@@ -476,6 +476,12 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         {
             if (entry.Task.SetStatus(DownloadStatus.Paused))
             {
+                lock (_gate)
+                {
+                    entry.SpeedBps = 0;
+                    entry.Eta = null;
+                }
+
                 PersistStatus(entry);
                 Publish(id);
             }
@@ -656,6 +662,13 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                 return;
             }
 
+            if (status is not DownloadStatus.Downloading)
+            {
+                // 离开「下载中」就不该再有速度/ETA：引擎最后一帧进度可能晚于这次状态回调。
+                entry.SpeedBps = 0;
+                entry.Eta = null;
+            }
+
             if (status == DownloadStatus.Completed)
             {
                 entry.CompletedAt = DateTimeOffset.Now;
@@ -685,6 +698,12 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         lock (_gate)
         {
             if (!_entries.TryGetValue(id, out var entry))
+            {
+                return;
+            }
+
+            // 暂停后引擎可能还有一帧进度在飞：状态已经不是下载中就丢掉，否则界面会显示假速度。
+            if (entry.Task.Status is not DownloadStatus.Downloading)
             {
                 return;
             }
@@ -1297,6 +1316,8 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         }
 
         var segments = task.Snapshot();
+        // 速度/ETA 只在「下载中」有意义：暂停/排队/完成时归零，避免残留的采样值让界面显示假速度。
+        var running = task.Status is DownloadStatus.Downloading;
         return new DownloadRecord
         {
             Id = task.Id,
@@ -1305,8 +1326,8 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
             TargetFolder = task.TargetFolder,
             SizeBytes = task.TotalSize ?? 0,
             SyncedBytes = task.SyncedTotal,
-            SpeedBps = entry.SpeedBps,
-            RemainingSeconds = entry.Eta is { } eta ? (int)Math.Ceiling(eta.TotalSeconds) : null,
+            SpeedBps = running ? entry.SpeedBps : 0,
+            RemainingSeconds = running && entry.Eta is { } eta ? (int)Math.Ceiling(eta.TotalSeconds) : null,
             Status = task.Status,
             ErrorText = entry.ErrorText,
             SegmentCount = segments.Count,

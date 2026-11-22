@@ -53,6 +53,10 @@
   `TreatWarningsAsErrors=true` 直接编译失败。所以 release **只发普通档**，不做 self-contained（41 MB 不值）
   也不做 AOT；要恢复得先改成 `JsonSerializerContext` 源生成（见待决事项 11）。
 - 测试条数不变（只加流水线）：全量 382 通过（Core 271 + Ui.Mew 111）。
+- **CI 首跑（tag `v0.1`）挂在 `PauseRunningTask_KeepsPartFile_AndResumeFinishes`**：`Assert.Equal(0, paused.SpeedBps)`
+  在 runner 上实际是 983425.78 —— 暂停后快照仍带着上一帧采样速度（本地时序恰好没暴露）。修法：`ToRecordLocked`
+  按状态兜底（非 `Downloading` 一律输出 0 速度 / null ETA）、`OnTaskStatusChanged` 离开下载中即清零、
+  `OnProgress` 丢掉暂停后迟到的帧、队列暂停分支同样清零；测试补「暂停后任何 Paused 快照速度必须为 0」的回归断言。
 
 ### 2026-11-23 · HF 搜索支持多关键字
 

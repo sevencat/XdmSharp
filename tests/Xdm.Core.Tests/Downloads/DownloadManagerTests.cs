@@ -123,6 +123,9 @@ public class DownloadManagerTests
         var bytes = EngineHarness.MakeBytes(1024 * 1024, seed: 5);
         harness.Server.AddFile("/slow.bin", bytes, Slow);
 
+        var updates = new ConcurrentQueue<DownloadRecord>();
+        manager.TaskUpdated += updates.Enqueue;
+
         var id = manager.Enqueue(Request(harness, "/slow.bin", "slow.bin"));
         Assert.True(harness.WaitFor(() => manager.Find(id)?.SyncedBytes >= 128 * 1024), "没跑起来");
 
@@ -130,6 +133,13 @@ public class DownloadManagerTests
         var paused = manager.Find(id)!;
         Assert.Equal(DownloadStatus.Paused, paused.Status);
         Assert.Equal(0, paused.SpeedBps);
+
+        // 暂停后引擎可能还有一帧进度在飞：任何 Paused 快照都不许带速度（CI 慢机上就是这么翻的）。
+        Thread.Sleep(200);
+        Assert.All(
+            updates.Where(r => r.Status == DownloadStatus.Paused),
+            r => Assert.Equal(0, r.SpeedBps));
+        Assert.Equal(0, manager.Find(id)!.SpeedBps);
         Assert.True(File.Exists(Path.Combine(harness.TargetFolder, ".1.xdm-part")));
 
         Assert.True(manager.Resume(id));
