@@ -31,6 +31,7 @@
 | 9 | 发布形态：framework-dependent 目录（约 5MB）/ self-contained（41MB）/ NativeAOT（15MB） | 走 **framework-dependent**：zip 约 2.5 MB，目标机自装 .NET 11 运行时（README「运行要求」）；self-contained 单文件 41 MB 暂不做；AOT 档等 #11 修好再上 | 2026-11-23 |
 | 10 | 同时下载/恢复的任务量大时，界面怎么刷 | **待更新项进队列 → `DispatcherTimer` 每 200ms 在 UI 线程批量 flush**；同时把行定位改字典索引、每帧汇总只算一次、结构变化合并（方案见 `ARCHITECTURE.md` §6.1）。当前是 250ms 单条 drain，够用到百级任务 | 2026-11-22（方案定，未实现） |
 | 11 | NativeAOT 档怎么恢复（当前 `PublishAot=true` 编不过） | `HfDownloadPlanner` 的 `JsonSerializer.Serialize<TValue>` 反射序列化触发 IL2026/IL3050，`TreatWarningsAsErrors` 下直接失败；要恢复得迁到 `JsonSerializerContext` 源生成。Release 流水线先只出自包含单文件 | 2026-11-23 |
+| 12 | release.yml 的「测试」步骤偶发长时间 in progress | 同提交的 CI 用 `dotnet test --no-build` 1m27s 全绿，Release 里 `dotnet test`（带 build）5~7 分钟不结束。已加 `timeout-minutes: 20` 并把 `OnProgress` 里在 `_gate` 内读 `Task.Status` 的嵌套锁撤回（`DownloadTask.Status` 自带锁，怀疑与引擎回调成环），仍未复现。下次卡住时可在 runner 上用 `dotnet test --blame-hang-timeout 60s` 抓挂起测试 | 2026-11-23（待定位） |
 
 ## 日志
 
@@ -52,6 +53,10 @@
   `JsonSerializer.Serialize<TValue>(...)`（反射序列化），`PublishAot=true` 时报 IL2026 / IL3050，加上
   `TreatWarningsAsErrors=true` 直接编译失败。所以 release **只发普通档**，不做 self-contained（41 MB 不值）
   也不做 AOT；要恢复得先改成 `JsonSerializerContext` 源生成（见待决事项 11）。
+- **正式发版 v0.1（2026-11-23）**：<https://github.com/sevencat/XdmSharp/releases/tag/v0.1>，附件
+  `xdm-0.1-win-x64.zip` 2.49 MB（解压 26 个文件 / 5.2 MB）。因 Release 流水线的「测试」步骤反复卡住
+  （同提交的 CI 1m27s 就绿），这版是本地按流水线同样命令 publish 后 `gh release create` 发出去的；
+  流水线后来跑通会用 `gh release upload --clobber` 覆盖附件，不会冲突（见待决事项 12）。
 - 测试条数不变（只加流水线）：全量 382 通过（Core 271 + Ui.Mew 111）。
 - **CI 首跑（tag `v0.1`）挂在 `PauseRunningTask_KeepsPartFile_AndResumeFinishes`**：`Assert.Equal(0, paused.SpeedBps)`
   在 runner 上实际是 983425.78 —— 暂停后快照仍带着上一帧采样速度（本地时序恰好没暴露）。修法：`ToRecordLocked`
