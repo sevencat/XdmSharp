@@ -8,6 +8,12 @@ namespace Xdm.Ui.Samples;
 /// </summary>
 public static class SampleDownloads
 {
+    /// <summary>
+    /// 演示里的多文件任务父行 id（列表第 4 行）。给 <see cref="Children"/> 提供 4 个 safetensors 子文件，
+    /// 用来在 <c>XDM_DEMO</c> 下肉眼验收「行首三角展开」。
+    /// </summary>
+    public const long GroupId = 4;
+
     private static readonly string[] Catalog =
     [
         "ubuntu-24.04-desktop-amd64.iso",
@@ -32,6 +38,13 @@ public static class SampleDownloads
 
         for (var i = 0; i < count; i++)
         {
+            // 第 4 行留一个 HF 模型包：演示模式下点行首三角能看到子文件行。
+            if (i == GroupId - 1 && count > GroupId - 1)
+            {
+                records.Add(Group(now));
+                continue;
+            }
+
             var status = i switch
             {
                 0 or 1 or 2 => DownloadStatus.Downloading,
@@ -73,6 +86,60 @@ public static class SampleDownloads
         }
 
         return records;
+    }
+
+    /// <summary>演示模式下的子文件快照（真实引擎走 <c>IDownloadActions.Children</c>）。</summary>
+    public static IReadOnlyList<DownloadRecord> Children(long parentId)
+        => parentId == GroupId ? GroupChildren() : [];
+
+    private static DownloadRecord Group(DateTimeOffset now) => new()
+    {
+        Id = GroupId,
+        FileName = "Qwen2.5-7B-Instruct",
+        Url = "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct",
+        TargetFolder = @"D:\Downloads\Qwen2.5-7B-Instruct",
+        SizeBytes = 15_200_000_000,
+        SyncedBytes = 8_700_000_000,
+        SpeedBps = 6_400_000,
+        RemainingSeconds = 1016,
+        Status = DownloadStatus.Downloading,
+        IsContainer = true,
+        ChildCount = 4,
+        CompletedChildren = 2,
+    };
+
+    private static IReadOnlyList<DownloadRecord> GroupChildren()
+    {
+        var now = DateTimeOffset.Now;
+        return
+        [
+            File(1, 0.9, DownloadStatus.Completed, 0, now.AddMinutes(-11)),
+            File(2, 0.75, DownloadStatus.Completed, 0, now.AddMinutes(-8)),
+            File(3, 0.31, DownloadStatus.Downloading, 6_400_000, null),
+            File(4, 0, DownloadStatus.Queued, 0, null),
+        ];
+
+        static DownloadRecord File(int index, double progress, DownloadStatus status, double speed, DateTimeOffset? done)
+        {
+            const long size = 3_800_000_000;
+            var synced = (long)(size * progress);
+            return new DownloadRecord
+            {
+                Id = GroupId * 100 + index,
+                ParentId = GroupId,
+                FileName = $"model-0000{index}-of-00004.safetensors",
+                Url = $"https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/resolve/main/model-0000{index}-of-00004.safetensors",
+                TargetFolder = @"D:\Downloads\Qwen2.5-7B-Instruct",
+                SizeBytes = size,
+                SyncedBytes = synced,
+                SpeedBps = speed,
+                RemainingSeconds = speed > 0 ? (int)((size - synced) / speed) : null,
+                Status = status,
+                SegmentCount = 4,
+                CompletedSegments = status is DownloadStatus.Completed ? 4 : (int)(progress * 4),
+                CompletedAt = done,
+            };
+        }
     }
 
     private static string NameOf(int index)

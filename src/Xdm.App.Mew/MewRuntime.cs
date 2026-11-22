@@ -88,6 +88,7 @@ internal sealed class MewRuntime : IDisposable
             var viewModel = new MainWindowViewModel(SampleDownloads.Create(Math.Max(demoCount, 0)))
             {
                 DbPath = "(演示模式 · 未接任务库)",
+                DemoChildren = SampleDownloads.Children,
             };
 
             return new MewRuntime(paths, isDemo: true, new AppSettings(), viewModel);

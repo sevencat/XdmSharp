@@ -146,6 +146,9 @@ public sealed class MainWindow : Window
         {
             foreach (DownloadRowViewModel row in e.NewItems)
             {
+                // ApplyFilter 的 Clear() 走 Reset（OldItems 为 null），退订不到；同一行反复 Add 时
+                // 先减再加，避免订阅叠成 N 份（展开/收起、每次搜索都会重建集合）。
+                row.PropertyChanged -= OnRowPropertyChanged;
                 row.PropertyChanged += OnRowPropertyChanged;
             }
         }
@@ -270,6 +273,11 @@ public sealed class MainWindow : Window
     private const string RestoreGeometry = "M 2.5,0.5 L 9.5,0.5 L 9.5,7.5 M 0.5,2.5 L 7.5,2.5 L 7.5,9.5 L 0.5,9.5 Z";
 
     private const string CloseGeometry = "M 0.5,0.5 L 9.5,9.5 M 9.5,0.5 L 0.5,9.5";
+
+    // 行首展开三角（9×9 viewBox）：收起朝右、展开朝下，与窗钮同一套描边风格。
+    private const string CaretRightGeometry = "M 2.5,1 L 6.5,4.5 L 2.5,8 Z";
+
+    private const string CaretDownGeometry = "M 1,2.5 L 8,2.5 L 4.5,6.5 Z";
 
     private PathShape? _maxGlyph;
 
@@ -577,6 +585,21 @@ public sealed class MainWindow : Window
 
     private FrameworkElement BuildRow(TemplateContext ctx)
     {
+        // 行首 14px 是展开三角位：父行放三角，子行留空形成缩进（行高仍是统一 56）。
+        var caret = new PathShape().Width(9).Height(9).CenterHorizontal().CenterVertical();
+        caret.Data = PathGeometry.Parse(CaretRightGeometry);
+        caret.Stroke = MewTheme.TextSecondary;
+        caret.StrokeThickness = 1;
+
+        // 跨两行居中：只占 Row 0 会把第一行撑高，56 的行高就被顶破了。
+        var caretHit = new Border()
+            .Width(14)
+            .Height(28)
+            .Child(caret)
+            .RowSpan(2)
+            .CenterVertical()
+            .Column(0);
+
         var ext = new TextBlock()
             .FontSize(9)
             .Foreground(MewTheme.TextSecondary)
@@ -589,13 +612,14 @@ public sealed class MainWindow : Window
             .Background(MewTheme.BadgeBackground)
             .Child(ext)
             .RowSpan(2)
+            .Column(1)
             .CenterVertical();
 
         var name = new TextBlock()
             .FontSize(13)
             .Foreground(MewTheme.TextPrimary)
             .TextTrimming(TextTrimming.CharacterEllipsis)
-            .Column(1);
+            .Column(2);
 
         var size = new TextBlock()
             .FontSize(11)
@@ -604,7 +628,7 @@ public sealed class MainWindow : Window
 
         var sizeHost = new Border()
             .Child(size)
-            .Column(2);
+            .Column(3);
 
         var bar = new SegmentBar().CenterVertical();
         var progress = new TextBlock().FontSize(11).Foreground(MewTheme.TextSecondary).CenterVertical();
@@ -619,7 +643,7 @@ public sealed class MainWindow : Window
             .Spacing(8)
             .Children(bar, progress, detail)
             .Row(1)
-            .Column(1);
+            .Column(2);
 
         var speed = new TextBlock().FontSize(11).Foreground(MewTheme.TextSecondary).CenterVertical();
         var remaining = new TextBlock().FontSize(11).Foreground(MewTheme.TextSecondary).CenterVertical();
@@ -643,6 +667,18 @@ public sealed class MainWindow : Window
             Remaining = remaining,
             Badge = badge,
             BadgeText = badgeText,
+            Caret = caret,
+            CaretHit = caretHit,
+        };
+
+        // 三角只在多文件任务父行出现；点击展开/收起子文件行（行本身由 ListBox 负责选中）。
+        caretHit.Tag(binding);
+        caretHit.MouseDown += _ =>
+        {
+            if (caretHit.Tag is RowBinding b && b.Item is { CanExpand: true } row)
+            {
+                _vm.ToggleExpand(row);
+            }
         };
 
         // 行内按钮在 build 时挂一次事件，行对象由 bind 写进 RowBinding —— 容器复用后仍指向正确的行。
@@ -682,17 +718,18 @@ public sealed class MainWindow : Window
             .Spacing(4)
             .Children(speed, remaining, badge, toggle, open, delete)
             .Row(1)
-            .Column(2);
+            .Column(3);
 
         var grid = new RowHost()
             .Columns(
             [
+                new GridLength(14, GridUnitType.Pixel),
                 new GridLength(26, GridUnitType.Pixel),
                 GridLength.Star,
                 new GridLength(360, GridUnitType.Pixel),
             ])
             .Rows("Auto,Auto")
-            .Children(icon, name, sizeHost, middle, actions);
+            .Children(caretHit, icon, name, sizeHost, middle, actions);
 
         var root = new Border()
             .Height(MewTheme.RowHeight)
@@ -765,6 +802,15 @@ public sealed class MainWindow : Window
         binding.Bar.IsVisible = item.ShowProgress;
         binding.Bar.Fill = item.IsFailed ? MewTheme.Error : MewTheme.Progress;
 
+        // 三角：只有父行有；展开朝下、收起朝右。子行这一列留空，形成缩进。
+        // 行每秒被 apply 4 次，PathGeometry.Parse 只在朝向真的变了才做。
+        binding.CaretHit.IsVisible = item.CanExpand;
+        if (binding.CaretExpanded != item.IsExpanded)
+        {
+            binding.CaretExpanded = item.IsExpanded;
+            binding.Caret.Data = PathGeometry.Parse(item.IsExpanded ? CaretDownGeometry : CaretRightGeometry);
+        }
+
         binding.Toggle.Content(item.ToggleText);
     }
 
@@ -782,6 +828,14 @@ public sealed class MainWindow : Window
         public DownloadRowViewModel? Item { get; set; }
 
         public Border Root { get; set; } = null!;
+
+        /// <summary>展开三角（父行可见）及其点击区。</summary>
+        public PathShape Caret { get; set; } = null!;
+
+        public Border CaretHit { get; set; } = null!;
+
+        /// <summary>上一次画三角时的展开状态，避免每帧重新 Parse 几何。</summary>
+        public bool CaretExpanded { get; set; }
 
         public TextBlock Ext { get; set; } = null!;
 

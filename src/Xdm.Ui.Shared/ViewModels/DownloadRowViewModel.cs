@@ -13,6 +13,7 @@ public sealed class DownloadRowViewModel : ViewModelBase
 {
     private DownloadRecord _record;
     private double _progress;
+    private bool _isExpanded;
 
     public DownloadRowViewModel(
         DownloadRecord record,
@@ -63,8 +64,15 @@ public sealed class DownloadRowViewModel : ViewModelBase
     /// <summary>多文件任务的父行（HF 模型包）：第二行显示「文件数」，不是「段数」。</summary>
     public bool IsContainer => _record.IsContainer;
 
-    /// <summary>多文件子任务的子行；列表里不显示，留给以后的展开视图。</summary>
-    public ObservableCollection<DownloadRowViewModel> Children { get; } = [];
+    /// <summary>父行的子文件行是否展开；决定行首三角朝向，子行恒为 false。</summary>
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        internal set => SetProperty(ref _isExpanded, value);
+    }
+
+    /// <summary>能展开子文件行的只有多文件任务父行（HF 模型包）。</summary>
+    public bool CanExpand => IsContainer;
 
     /// <summary>0..1；按 ≥1% 变化才通知（`UI-DESIGN.md` §4 进度刷新约束）。</summary>
     public double Progress

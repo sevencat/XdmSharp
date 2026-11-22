@@ -12,6 +12,12 @@ public sealed class MainWindowViewModel : ViewModelBase
 {
     private static long _demoId = 100_000;
     private readonly List<DownloadRowViewModel> _all = [];
+
+    /// <summary>
+    /// 已展开的父行 → 子文件行（顺序同引擎快照）。只在这里留一份：收起来就丢掉，
+    /// 再次展开重新向引擎拉快照，不缓存陈旧进度。
+    /// </summary>
+    private readonly Dictionary<long, List<DownloadRowViewModel>> _expanded = [];
     private CategoryViewModel _selectedCategory;
     private DownloadRowViewModel? _selectedRow;
     private string _searchText = string.Empty;
@@ -39,6 +45,12 @@ public sealed class MainWindowViewModel : ViewModelBase
     /// 引擎出口；为空表示「演示 / 单测」模式，命令只改本地状态，不会有真实下载。
     /// </summary>
     public IDownloadActions? Actions { get; set; }
+
+    /// <summary>
+    /// 演示模式下的子文件来源（<c>XDM_DEMO</c> 不接引擎，但行首展开视图得能看）。
+    /// 真实运行只走 <see cref="Actions"/>，这里保持 null。
+    /// </summary>
+    public Func<long, IReadOnlyList<DownloadRecord>>? DemoChildren { get; init; }
 
     /// <summary>主列表绑定的集合（虚拟化容器读取的就是它）。</summary>
     public ObservableCollection<DownloadRowViewModel> Rows { get; } = [];
@@ -100,7 +112,8 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
     }
 
-    public string ListSummary => $"显示 {Rows.Count} / 共 {_all.Count} 个任务";
+    /// <summary>只数父行：展开出来的子文件行不是独立任务，不该把「显示 N」撑大。</summary>
+    public string ListSummary => $"显示 {Rows.Count(r => r.IsParent)} / 共 {_all.Count} 个任务";
 
     /// <summary>进行中任务数（不受分类过滤影响，退出确认文案用）。</summary>
     public int ActiveCount => _all.Count(r => r.IsActive);
@@ -162,6 +175,13 @@ public sealed class MainWindowViewModel : ViewModelBase
     /// <summary>用最新快照刷新对应行（引擎回调 → 4Hz 节流后调用）。</summary>
     public void UpdateRow(DownloadRecord record)
     {
+        // 子任务只更新「已展开的父行」里那一份行；没展开时父行汇总已经把它算进去了。
+        if (record.ParentId is { } parentId)
+        {
+            UpdateChildRow(parentId, record);
+            return;
+        }
+
         var row = _all.Find(r => r.Id == record.Id);
         if (row is null)
         {
@@ -232,8 +252,52 @@ public sealed class MainWindowViewModel : ViewModelBase
         if (_all.Find(r => r.Id == id) is { } row)
         {
             RemoveRow(row);
+            return;
+        }
+
+        // 展开视图里删单个文件：引擎推的是子任务 id，父行仍在。
+        foreach (var children in _expanded.Values)
+        {
+            if (children.Find(c => c.Id == id) is { } child)
+            {
+                RemoveRow(child);
+                return;
+            }
         }
     }
+
+    /// <summary>
+    /// 展开/收起多文件任务的子文件行（`UI-DESIGN.md` §4）。子行插在父行之后、跟着父行进同一个
+    /// <see cref="Rows"/>，所以行高仍是统一 56；收起只是把它们从集合里摘掉。
+    /// </summary>
+    public void ToggleExpand(DownloadRowViewModel row)
+    {
+        ArgumentNullException.ThrowIfNull(row);
+        if (!row.CanExpand)
+        {
+            return;
+        }
+
+        if (_expanded.Remove(row.Id))
+        {
+            row.IsExpanded = false;
+            ApplyFilter();
+            return;
+        }
+
+        var children = new List<DownloadRowViewModel>();
+        foreach (var record in Actions?.Children(row.Id) ?? DemoChildren?.Invoke(row.Id) ?? [])
+        {
+            children.Add(NewChildRow(record));
+        }
+
+        _expanded[row.Id] = children;
+        row.IsExpanded = true;
+        ApplyFilter();
+    }
+
+    private DownloadRowViewModel NewChildRow(DownloadRecord record)
+        => new(record, TogglePause, Delete, OpenFolder);
 
     /// <summary>
     /// 新建窗口确认后：交给管理器建任务；没有引擎（演示 / 单测）时按请求造占位行。
@@ -316,6 +380,15 @@ public sealed class MainWindowViewModel : ViewModelBase
             }
 
             Rows.Add(row);
+
+            // 展开状态跟着父行走：换分类、改搜索词重建集合后子行还在原位。
+            if (_expanded.TryGetValue(row.Id, out var children))
+            {
+                foreach (var child in children)
+                {
+                    Rows.Add(child);
+                }
+            }
         }
 
         RaisePropertyChanged(nameof(IsEmpty));
@@ -362,8 +435,25 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     private void RemoveRow(DownloadRowViewModel row)
     {
+        if (row.IsChild)
+        {
+            // 子行不在 _all 里，也不进分类计数；摘掉它只影响展开出来的那一段。
+            if (row.Record.ParentId is { } parentId && _expanded.TryGetValue(parentId, out var siblings))
+            {
+                siblings.Remove(row);
+            }
+
+            if (ReferenceEquals(SelectedRow, row))
+            {
+                SelectedRow = null;
+            }
+
+            ApplyFilter();
+            return;
+        }
+
         _all.Remove(row);
-        Rows.Remove(row);
+        _expanded.Remove(row.Id);
         if (ReferenceEquals(SelectedRow, row))
         {
             SelectedRow = null;
@@ -371,6 +461,31 @@ public sealed class MainWindowViewModel : ViewModelBase
 
         RefreshCounts();
         RefreshSummaries();
+
+        // 整表重建：父行没了，它展开出来的子行也必须一起消失。
+        ApplyFilter();
+    }
+
+    /// <summary>展开期间引擎推来的子任务快照 → 对应子行。</summary>
+    private void UpdateChildRow(long parentId, DownloadRecord record)
+    {
+        if (!_expanded.TryGetValue(parentId, out var children))
+        {
+            return;
+        }
+
+        foreach (var child in children)
+        {
+            if (child.Id == record.Id)
+            {
+                child.Update(record);
+                return;
+            }
+        }
+
+        // 展开发生在子任务建好之前：第一条进度推过来时补上这一行（追加到末尾，顺序影响很小）。
+        children.Add(NewChildRow(record));
+        ApplyFilter();
     }
 
     private void ApplyStatus(DownloadRowViewModel row, DownloadStatus status)

@@ -706,7 +706,7 @@ new SocketsHttpHandler {
 | 3 | 引擎只见 `SourceOutcome` 语义，**不见 HTTP 状态码**；429/403 的判定封在 `RangeHttpClient` 内 | BT/镜像站无法复用调度逻辑，只能复制一份 |
 | 4 | `Segment` 支持可选 `SegmentVerifier`（校验通过才 `Synced`）；首期传 null 但字段与调用点都在 | V3 piece 校验要改 `SegmentRunner` 核心循环 |
 | 5 | 字节写入只经 `PartFile`（偏移写），不允许"整文件顺序写"的捷径 | BT piece 乱序到达无处落盘，等于重写存储层 |
-| 6 | UI 行模板按"任务行 + 可选子行"设计，进度/大小/速度对父子同构；首期只渲染单行 | HF 千文件、BT 多文件在列表里无处展开 |
+| 6 | UI 行模板按"任务行 + 可选子行"设计，进度/大小/速度对父子同构；默认只渲染父行，父行三角可展开子行（2026-11-23 落地，见 §12.2.2） | HF 千文件、BT 多文件在列表里无处展开 |
 
 对应的 schema 预留（已在 §7.1 DDL 内）：`tasks.kind`、`tasks.parent_id`、`tasks.content_sha256`、
 `tasks.source_meta_json`。`source_meta_json` 存协议私有信息（V2：repo / revision / path；
@@ -782,9 +782,15 @@ V3：infohash / torrent 路径），首期恒为 NULL。
 - **重启恢复**：`parent_id` 分组即父子关系——**有子行的才是父行**（首版按文件建的 HF 任务没有子行，
   仍按普通任务显示，无需数据迁移）；父行不做「已完成文件是否存在」检查（它的 `file_name` 是仓库名），
   状态与完成时间全部按子任务重算。
-- **UI**：`MainWindowViewModel.AddRange` 跳过 `ParentId != null` 的行，列表只有父行；
+- **UI**：`MainWindowViewModel.AddRange` 跳过 `ParentId != null` 的行，列表默认只有父行；
   第二行中部由「段」换成「个文件」（`3/12 个文件 · D:\Downloads`），图标标签为「包」；
   完成通知只按父行报一次。
+- **展开视图（2026-11-23）**：父行行首三角 → `ToggleExpand` 同步调 `IDownloadActions.Children(id)`
+  （引擎侧就是 `DownloadManager.Children` 的快照，不持 `_gate`），把子行插到父行之后同 `Rows` 里，
+  行高仍是统一 56。状态存在 `_expanded`（父 id → 子行）：换分类/搜索重建集合时跟着父行恢复，
+  父行删除时整段消失；子行**不进 `_all`、不进分类计数**，也不影响 `ListSummary`（只数父行）。
+  展开期间引擎的子任务 `TaskUpdated` 走 `UpdateRow` 的 `ParentId` 分支直接刷那一行，
+  没展开时直接丢弃（父行汇总已含）。演示模式由 `SampleDownloads.Children` 供数据（`XDM_DEMO` 第 4 行）。
 
 ### 12.3 BitTorrent（V3）
 
