@@ -14,6 +14,7 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    timeout-minutes: 20 # 卡住就显式失败，别一直 in progress（排查时看不出是慢还是挂）
     steps:
       - uses: actions/checkout@v4
 

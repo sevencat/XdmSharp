@@ -702,12 +702,8 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                 return;
             }
 
-            // 暂停后引擎可能还有一帧进度在飞：状态已经不是下载中就丢掉，否则界面会显示假速度。
-            if (entry.Task.Status is not DownloadStatus.Downloading)
-            {
-                return;
-            }
-
+            // 这里不再读 entry.Task.Status：Task 的 Status getter 自己也要锁，在 _gate 内再拿 Task 锁
+            // 是新增的锁嵌套点（可能和引擎回调形成环路）。暂停后残留的速度由 ToRecordLocked 按状态兜底吃掉。
             entry.SpeedBps = bytesPerSecond;
             entry.Eta = eta;
         }
