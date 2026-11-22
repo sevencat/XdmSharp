@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Aprillz.MewUI;
 using Xdm.Core.Downloads;
+using Xdm.Ui.Services;
 using Xdm.Ui.ViewModels;
 
 namespace Xdm.App.Mew;
@@ -18,7 +19,20 @@ internal sealed class MewDownloadBridge : IDisposable
     private readonly MainWindowViewModel _viewModel;
     private readonly ConcurrentDictionary<long, DownloadRecord> _pending = new();
     private readonly DispatcherTimer _timer;
+
+    /// <summary>
+    /// 识别「刚变成完成」这一跳（引擎会重复推送同状态）。只在 UI 线程访问
+    /// （<see cref="OnTaskAdded"/> 等的回调都经过 <see cref="Post"/> 切到 UI 线程）。
+    /// </summary>
+    private readonly DownloadCompletionWatcher _completion = new();
+
     private bool _disposed;
+
+    /// <summary>
+    /// 任务刚刚进入 <see cref="DownloadStatus.Completed"/>（同一任务只触发一次，重复推送不会重复报喜）。
+    /// 在 UI 线程触发；窗口在前台时由订阅方决定是否忽略。
+    /// </summary>
+    public event Action<DownloadRecord>? TaskCompleted;
 
     public MewDownloadBridge(DownloadManager manager, MainWindowViewModel viewModel)
     {
@@ -49,9 +63,17 @@ internal sealed class MewDownloadBridge : IDisposable
         _manager.TaskUpdated -= OnTaskUpdated;
     }
 
-    private void OnTaskAdded(DownloadRecord record) => Post(() => _viewModel.Add(record));
+    private void OnTaskAdded(DownloadRecord record) => Post(() =>
+    {
+        _completion.Observe(record.Id, record.Status);
+        _viewModel.Add(record);
+    });
 
-    private void OnTaskRemoved(long id) => Post(() => _viewModel.RemoveById(id));
+    private void OnTaskRemoved(long id) => Post(() =>
+    {
+        _completion.Forget(id);
+        _viewModel.RemoveById(id);
+    });
 
     private void OnTaskUpdated(DownloadRecord record) => _pending[record.Id] = record;
 
@@ -64,9 +86,17 @@ internal sealed class MewDownloadBridge : IDisposable
 
         foreach (var id in _pending.Keys)
         {
-            if (_pending.TryRemove(id, out var record))
+            if (!_pending.TryRemove(id, out var record))
             {
-                _viewModel.UpdateRow(record);
+                continue;
+            }
+
+            _viewModel.UpdateRow(record);
+
+            // 只在「非完成 → 完成」这一跳报一次：引擎会重复推送同状态的记录。
+            if (_completion.Observe(id, record.Status))
+            {
+                TaskCompleted?.Invoke(record);
             }
         }
     }

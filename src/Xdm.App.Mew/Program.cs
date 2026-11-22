@@ -1,5 +1,6 @@
 using Aprillz.MewUI;
 using Xdm.Core.Configuration;
+using Xdm.Core.Downloads;
 using Xdm.Core.Shell;
 using Xdm.Ui.Mew;
 
@@ -89,10 +90,17 @@ internal static class Program
                     ConfirmOnExit = true,
                 };
 
+                TrayIcon? tray = null;
+
                 // 引擎事件桥在 startup 回调里建：DispatcherTimer 必须在消息循环的 UI 线程上构造。
                 Application.Run(window, () =>
                 {
                     runtime.ConnectEngine();
+
+                    if (runtime.Bridge is { } bridge)
+                    {
+                        bridge.TaskCompleted += record => NotifyCompleted(window, tray, runtime, record);
+                    }
 
                     // startup 回调跑在主窗口真正显示之前：此时弹模态框会让主窗口永远等不到显示
                     // （实测只剩「新建下载」一个窗口）。等首帧画完再处理链接与转发请求。
@@ -103,6 +111,9 @@ internal static class Program
                         var dispatcher = Application.Current?.Dispatcher;
                         dispatcher?.BeginInvoke(() =>
                         {
+                            // 托盘图标要消息泵已经在跑（自定义 message-only 窗口的 WndProc 靠它派发）。
+                            tray = TryAttachTray(window);
+
                             if (!string.IsNullOrWhiteSpace(options.Url))
                             {
                                 Activate(window, options.Url);
@@ -116,6 +127,7 @@ internal static class Program
                     window.FirstFrameRendered += OnFirstFrame;
                 });
 
+                tray?.Dispose();
                 return 0;
             }
             finally
@@ -191,6 +203,40 @@ internal static class Program
         {
             window.BeginNewDownload(url);
         }
+    }
+
+    /// <summary>
+    /// 托盘入口：左键/双击把窗口提到前面，右键菜单可打开窗口或退出。失败只记日志——托盘是锦上添花，
+    /// 不能让「Shell_NotifyIcon 不可用」（比如被组策略禁掉）连累主界面。
+    /// </summary>
+    private static TrayIcon? TryAttachTray(MainWindow window)
+    {
+        try
+        {
+            return TrayIcon.Attach("XDM Sharp", () => Activate(window, null), () => window.Close());
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or DllNotFoundException or EntryPointNotFoundException)
+        {
+            Console.Error.WriteLine($"[tray] 托盘图标不可用：{ex.Message}");
+            Console.Error.Flush();
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 完成提示：设置里关掉就不提示；窗口在前台时也不打扰（用户正看着那一行变成「已完成」），
+    /// 其余情况用托盘气泡 + 任务栏闪烁。
+    /// </summary>
+    private static void NotifyCompleted(MainWindow window, TrayIcon? tray, MewRuntime runtime, DownloadRecord record)
+    {
+        if (tray is null || !runtime.Settings.NotifyOnComplete || ForegroundWindow.Is(window.Handle))
+        {
+            return;
+        }
+
+        var name = string.IsNullOrWhiteSpace(record.FileName) ? record.Url : record.FileName;
+        tray.ShowBalloon("下载完成", name);
+        TrayIcon.FlashTaskbar(window.Handle);
     }
 
     private static void Fail(string message)

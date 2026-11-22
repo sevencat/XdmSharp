@@ -2,34 +2,38 @@
 
 界面先行的落地依据。M1 全部用假数据实现本文件；M4 只替换数据来源，不改布局。
 
+> **实现说明（2026-11-22）**：唯一实现是 `src/Xdm.Ui.Mew`（MewUI，code-first，Win32 + Direct2D）。
+> 本文件早期按 Avalonia 版（已删除）写的实现细节（`*.axaml`、Fluent 资源字典、`x:Class`）已不再适用，
+> **视觉与交互规范仍然有效**，实现手段以 §12 的对照表为准。
+
 ## 1. 设计基调
 
-- 组件库：Fluent 主题，由 `Sevencat.Avalonia.SimdAIO` 自带的 `Avalonia.Themes.Fluent.dll` 提供
-  （独立程序集身份，App 不要再引官方 `Avalonia.Themes.Fluent` 包）。不做重型自定义换肤。
+- 组件库：`Aprillz.MewUI` 自带控件 + `MewTheme` 统一色值与尺寸（无资源字典、无换肤）。
+  不做重型自定义控件外观。
 - 风格：信息密度优先（类 IDM / XDM 桌面端），行高 56，字号 12–13，圆角 4。
-- 明暗主题跟随系统，两套都用 Fluent 的 `ThemeVariant`，额外定义 4 个语义色资源：
-  `ProgressBrush`（主色）、`SuccessBrush`、`WarnBrush`、`ErrorBrush`。
+- 明暗主题跟随系统，色值集中在 `MewTheme`，另有 4 个语义色：
+  `Progress`（主色）、`Success`、`Warn`、`Error`。`MewThemeTests` 钉住色值与尺寸。
 
 ## 2. 窗口清单
 
-| 窗口 | 文件 | 首期 | 说明 |
+| 窗口 | 文件（`src/Xdm.Ui.Mew/`） | 首期 | 说明 |
 |---|---|---|---|
-| 主窗口 | `Views/MainWindow.axaml` | ✔ | 工具栏 + 分类 + 列表 + 状态栏 |
-| 新建下载 | `Views/NewDownloadWindow.axaml` | ✔ | 多行 URL、保存到、分段数、文件名 |
-| 进度详情 | `Views/DownloadDetailWindow.axaml` | ✔ | 分段可视化、速度曲线、日志 |
-| 设置 | `Views/SettingsWindow.axaml` | ✔ | 常规 / 连接 / 目录 / 网络 四页 |
-| 关于 | `Views/AboutWindow.axaml` | ✔ | 版本、许可（GPL-3.0）、参考实现声明 |
-| 完成通知 | `Views/CompletionToast.axaml` | M6 | 右下角气泡，可"打开文件/打开目录" |
-| 删除确认 / 重名冲突 | `Views/ConfirmDialog.axaml` | ✔ | 通用确认框，勿各写一套；支持一个可选勾选项（删除任务的「同时删除已下载的文件」） |
+| 主窗口 | `MainWindow.cs` | ✔ | 自绘标题栏 + 工具栏 + 分类 + 列表 + 状态栏 |
+| 新建下载 | `Dialogs/NewDownloadDialog.cs` | ✔ | 多行 URL、保存到、分段数、文件名 |
+| 进度详情 | （未实现，M6 之后） | ☐ | 分段可视化、速度曲线、日志 |
+| 设置 | `Dialogs/SettingsDialog.cs` | ✔ | 常规 / 连接 / 目录 / 网络 四页 |
+| 关于 | `Dialogs/AboutDialog.cs` | ✔ | 版本、许可（GPL-3.0）、参考实现声明 |
+| 完成通知 | （M6 进行中） | M6 | 右下角气泡 + 托盘气泡，可「打开文件 / 打开目录」 |
+| 删除确认 / 重名冲突 | `Dialogs/ConfirmDialog.cs` | ✔ | 通用确认框，勿各写一套；支持一个可选勾选项（删除任务的「同时删除已下载的文件」） |
 
-所有输入框（搜索、URL、设置项）用 `Controls/EditTextBox`，而不是原生 `TextBox`：主题自带的右键菜单是
-英文 Cut/Copy/Paste，`EditTextBox` 换成「撤销 / 剪切 / 复制 / 粘贴 / 全选」并在弹出时按选区置灰。
-它是 `TextBox` 子类且 `StyleKeyOverride => typeof(TextBox)`，样式与行为完全沿用父类型。
+所有输入框（搜索、URL、设置项）用 `Controls/EditBox`，而不是裸 `TextBox`：MewUI 默认右键菜单是
+英文 Cut/Copy/Paste，`EditBox` 换成「撤销 / 剪切 / 复制 / 粘贴 / 全选」并在弹出时按选区置灰
+（`MewTheme.ApplyContextMenu` 统一挂菜单）。
 
-以上文件均在 `src/Xdm.Ui/Views/`，命名空间 `Xdm.Ui.Views`（XAML 写 `x:Class="Xdm.Ui.Views.MainWindow"`）。
+以上文件均在 `src/Xdm.Ui.Mew/`，命名空间 `Xdm.Ui.Mew`（对话框在 `Xdm.Ui.Mew.Dialogs`）。
 
-所有窗口统一 `WindowDecorations="BorderOnly"` + 自绘 `Controls/TitleBar`（见 §11），
-不再使用系统标题栏；窗口 `Title` 仍保留（任务栏、Alt+Tab、Headless 断言依赖它）。
+所有窗口统一无系统标题栏 + 自绘标题栏（主窗口 `MainWindow.BuildTitleBar()`，对话框
+`Controls/TitleBarChrome`，见 §11）；窗口 `Title` 仍保留（任务栏、Alt+Tab、测试断言依赖它）。
 
 ## 3. 主窗口
 
@@ -52,12 +56,10 @@
 ```
 
 - 左栏固定 180px，可折叠；列表区用**虚拟化**容器。
-- 列表技术选型（**已定案**）：`ListBox` + `ItemTemplate` + `VirtualizingStackPanel`。
-  **不引 `Avalonia.Controls.DataGrid`**：两行式行模板本来就不吃列布局，且 `ListBox` 视觉树更轻、
-  虚拟化行为可预期、行内自绘（`SegmentBar`）更容易控制。列排序/列宽拖拽不是首期需求，
-  将来真要加就在 `ListBox` 之上做排序（ViewModel 排序 + 重建集合），不要把 DataGrid 拉回来。
-- 虚拟化参数：`VirtualizingStackPanel.VirtualizationMode` 保持默认回收模式；
-  `ScrollViewer.IsDeferredScrollingEnabled` 关闭；行模板不要包 `ScrollViewer`/`Border` 嵌套层级过深。
+- 列表技术选型（**已定案**）：`ListBox` 只按可见区绘制（MewUI 不为每行建元素，虚拟化是默认行为）。
+  两行式行本来不吃列布局，**不要**为了列头/列宽引入表格控件；真要排序就在 ViewModel 排完重建集合。
+- 行高与内边距必须走 `MewTheme`（`RowHeight = 56`），不要在行构建里写字面量——
+  `LayoutTests` 会拿它和规范比对。
 - 工具栏右侧：[⚙ 设置] [关于] [退出]，`Button.tool` 样式。**退出必须确认**：
   `MainWindow.ConfirmOnExit = true`（组合根设置）时，点「退出」与关窗口（标题栏关闭键 / Alt+F4）
   都走 `ConfirmDialog`，文案带进行中任务数（`MainWindowViewModel.ActiveCount`），
@@ -84,15 +86,13 @@
 
 实现约束：
 
-- 图标用 `PathIcon`（`Data` 直接写 path 字符串，`Stretch="Uniform"` 默认）。
-  `PathIcon.Fill` 取自继承的 `Foreground`，所以按钮禁用时图标自动变灰——**不要**改成
-  `Path` + 固定 `Fill`，那样禁用态图标仍是亮的。
-- 按钮 `Content` 变成 `StackPanel` 后，UIA 名称不再是文本，**必须**显式设
-  `AutomationProperties.Name="暂停"` 之类；`ConfirmDialog` 在构造里同步设置（按钮文案可换）。
-- 行内悬停按钮（`DownloadRow` 的暂停/目录/删除）保持纯文字 11px：行高只有 56，
-  加图标会挤，且它们是次要操作。
+- 图标用 `PathShape` 画矢量（`StrokeThickness` 必须显式给，MewUI 默认 0 会"看不见"）。
+  颜色跟着主题 token 走，禁用态用 `MewTheme.DisabledForeground`，**不要**写死色值。
+- 按钮装的是「图标 + 文本」横向栈时，测试里别指望自动取到文案——断言走
+  `VisualTree.Texts`（它会同时读 `TextBlock.Text` 与 `AccessText.RawText`）。
+- 行内悬停按钮（暂停/目录/删除）保持纯文字 11px：行高只有 56，加图标会挤，且是次要操作。
 
-## 4. 列表行规范（`Controls/DownloadRow.axaml`）
+## 4. 列表行规范（`MainWindow.cs` 的行构建 + `Controls/RowHost.cs`）
 
 两行式，高 56，内边距 12/8：
 
@@ -193,14 +193,15 @@
 - 失败行：文件名下方直接显示错误文案（中文），Tooltip 为详细异常；提供 [重试]。
 - 目录不可写：新建时阻断；运行中出现则任务转 `磁盘错误` 状态并保留 `.xdm-part`。
 
-## 9. 可测试性约定（Headless 断言依赖）
+## 9. 可测试性约定（视图层断言依赖）
 
-- 每个关键控件必须设 `x:Name`，命名规范 `Part_Element`：
-  `Main_TaskList`、`Main_StatusText`、`Row_FileName`、`Row_ProgressText`、`New_UrlBox`、`New_OkButton`。
-- 行模板内控件的绑定必须可被 ViewModel 单测覆盖（`INotifyPropertyChanged` 属性名稳定）。
-- 所有图标按钮设 `AutomationProperties.Name`（中文动作名），Headless 测试按名字查找，
-  顺便满足无障碍。
-- 禁止把状态文案硬编码在 XAML：统一走 `DownloadStatusTextConverter`，便于测试断言中文文案。
+- 关键控件在构造时挂稳定的 `Name`，命名规范 `Part_Element`：
+  `Main_TaskList`、`Main_StatusText`、`New_UrlBox`、`New_OkButton`（MewUI 里是 `Element.Name`）。
+- 行内容不要靠"找控件"断言：`ListBox` 不为每行建元素，文案断言走
+  `VisualTree.Texts()` 遍历可见元素。
+- 所有图标按钮的文案必须落在 `AccessText`/`TextBlock` 上（中文动作名），既满足无障碍，
+  也让 `VisualTree.Texts` 能取到。
+- 禁止把状态文案硬编码在视图里：统一走 `TextFormat` / `DownloadStatusText`，便于测试断言中文文案。
 
 ## 10. 尺寸与资源 token
 
@@ -212,16 +213,15 @@
 | 状态栏高 | 24 |
 | 左栏宽 | 180（可折叠至 0） |
 | 圆角 | 4（进度条 2） |
-| 字体 | 系统字体栈（SimdAIO 无 Inter，禁止 `WithInterFont()`；字号/字重按 Fluent 默认） |
+| 字体 | 系统字体栈（不引入外部字体；字号/字重按 MewUI 默认） |
 | 字号 | 13 正文 / 11 次要 / 15 标题 |
 
 ## 11. 窗口外观（自绘标题栏 / 尺寸 / 图标）
 
-系统 chrome 一律关掉，标题栏自己画：`WindowDecorations="BorderOnly"`
-（不要用 `ExtendClientAreaToDecorationsHint`——Avalonia 12.1.6 里它去不掉系统标题栏，
-会与本控件叠成两层；`ExtendClientAreaChromeHints` 在 12.x 已移除）。
+系统 chrome 一律关掉，标题栏自己画：MewUI 的窗口默认无系统装饰（`Window.Title` 仍设，
+任务栏与 Alt+Tab 用它）。拖动与双击最大化由 `WindowDrag.cs` 处理。
 
-### 11.1 `Controls/TitleBar`
+### 11.1 `MainWindow.BuildTitleBar()` / `Controls/TitleBarChrome.cs`
 
 | 项 | 规格 |
 |---|---|
@@ -262,26 +262,26 @@
   箭头本体（min 通道 ≤ 200）保留原配色；中间那圈浅色辉光按白色混入比例给半透明并反合成去白，
   否则贴到深色标题栏上会浮出一圈白雾。alpha 再做一遍 3×3 均值消掉洪泛边界的碎齿，
   最后按内容包围盒裁正方形缩到目标尺寸。
-- 界面内 logo：`src/Xdm.Ui/Assets/xdm-logo.png`（`AvaloniaResource`，256×256，**透明底**）：
-  标题栏（18px，`RenderOptions.BitmapInterpolationMode="HighQuality"`）、关于窗口（52px）、窗口 `Icon` 共用。
-- exe / 任务栏图标：`src/Xdm.App/Assets/xdm.ico`（`ApplicationIcon`），同一透明底打包
+- 界面内 logo：`src/Xdm.Ui.Mew/Assets/xdm-logo.png`（嵌入资源，256×256，**透明底**）：
+  标题栏（18px）、关于窗口（52px）共用。
+- exe / 任务栏图标：`src/Xdm.App.Mew/Assets/xdm.ico`（`ApplicationIcon`），同一透明底打包
   16/20/24/32/40/48/64/96/128/256 十个 PNG 压缩帧（手工拼 ICONDIR，256 帧在目录项里记 0）。
 - 不要再用「白底圆角牌」：标题栏是深色，白块会显得像贴纸。
 
-## 12. MewUI 前端的一致性约定
+## 12. MewUI 实现约定（唯一实现）
 
-MewUI 版（`Xdm.Ui.Mew`）是同一套规范的 code-first 实现，**视觉对齐按截图验收**，不按 XAML 对齐。
-与 Avalonia 版的差异只允许出现在实现手段上：
+`Xdm.Ui.Mew` 是同一套规范的 code-first 实现，**视觉对齐按截图验收**。下表是各规范项的实现手段
+（右列是现行实现；左列是已删除的 Avalonia 版，仅作历史对照）：
 
-| 规范项 | Avalonia 实现 | MewUI 实现 |
+| 规范项 | 原 Avalonia 实现（已删除） | 现行 MewUI 实现 |
 |---|---|---|
 | 颜色 / 尺寸 token | `Styles/Theme.axaml` 资源字典 | `MewTheme` 静态类（`MewThemeTests` 钉住色值与尺寸） |
 | 标题栏 | `Controls/TitleBar.axaml` | `MainWindow.BuildTitleBar()`（`Border` + `PathShape` 矢量窗钮） |
-| 对话框标题栏 | 各自 XAML | `Controls/TitleBarChrome.Build()`（四框共用） |
-| 暗色标题栏上的按钮 | `Button.cap` 样式 | **不能用 `Button`**：模板背景压不住，会在深色底上露出浅色方块，必须 `Border` 自绘 hover |
+| 对话框标题栏 | 各自 XAML | `Controls/TitleBarChrome`（四框共用） |
+| 暗色标题栏上的按钮 | `Button.cap` 样式 | **不能用 `Button`**：模板背景压不住，深色底上会露浅色方块，必须 `Border` 自绘 hover |
 | 右键菜单 | Fluent 默认（已是中文） | MewUI 自带英文 `Cut/Copy/Paste`，用 `Controls/EditBox.AttachMenu()` 换成中文并设 `CommandTarget` |
-| 状态文案 | `DownloadStatusTextConverter` | 同一个转换器（`Xdm.Ui.Shared`），MewUI 侧只换成 `BadgeStyle` 取色 |
+| 状态文案 | `DownloadStatusTextConverter` | 同一个转换器（`Xdm.Ui.Shared`），MewUI 侧只换取色（`BadgeStyle`） |
 | 行内图标 | `PathIcon` + 资源 | `PathShape` + `Geometry.Parse`，**必须显式设 `StrokeThickness=1`**，否则笔画不显示 |
 
-字号与间距仍按 §10；MewUI 的字体族走系统默认（不引入外部字体），实测中英文渲染与 Avalonia 版一致。
+字号与间距按 §10；字体走系统默认（不引入外部字体）。
 行高、标题栏高、状态栏高、左栏宽与 §10 表完全一致（`MewTheme` 里同名常量）。

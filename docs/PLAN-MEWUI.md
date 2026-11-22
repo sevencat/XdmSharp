@@ -1,5 +1,9 @@
 # MewUI 前端迁移计划
 
+> **状态：已完成并归档（S1–S5 全部交付）。** 2026-11-22 起 MewUI 是唯一前端，
+> Avalonia 前端（`Xdm.App` / `Xdm.Ui` / `Xdm.Ui.Tests`）已删除，产物统一 `xdm.exe`。
+> 本文保留「为什么这么迁移、踩过哪些坑」，后续不要再按本文的「并行双前端」口径实施。
+
 目标：在保留现有 Avalonia 前端的前提下，新增一套基于 **MewUI + Win32 + Direct2D** 的前端，
 共享同一份 ViewModel / 引擎，通过构建开关出两个 exe。本文只写结论、现状、阶段与风险，
 具体代码在阶段内落地。
@@ -8,11 +12,14 @@
 
 ---
 
-## 一、为什么是「并行新增」而不是「整体替换」
+## 一、为什么当初是「并行新增」而不是「整体替换」
+
+> 事后回看：并行跑通（B）是对的——先用 S1–S5 把 MewUI 侧做到可用、有测试、能量产，
+> 再在 2026-11-22 一次性删掉 Avalonia 侧。若一开始就整体替换，会出现"两边都不可用"的窗口期。
 
 | 方案 | 内容 | 结论 |
 |---|---|---|
-| A 整体替换 | `Xdm.Ui` 里的 Avalonia 视图全删，改写成 MewUI | ✗ 不做 |
+| A 整体替换 | `Xdm.Ui` 里的 Avalonia 视图全删，改写成 MewUI | ✗ 当时不做（现在是完成态：先并行、后删除） |
 | B 并行新增 | Avalonia 前端原样保留，新增 `Xdm.Ui.Mew` + `Xdm.App.Mew` | ✓ 采用 |
 
 理由：
@@ -282,9 +289,10 @@ MewUI 侧不重写任何业务（`TaskStore` / `DbSettingsStore` / `DownloadMana
 
 - ✅ 新建 `tests/Xdm.Ui.Mew.Tests`（**42 条**，不是计划的 15–20 条：行为类断言可以平移，
   控件树断言在不 Show 的前提下也做得成，见下方坑 23–24）。
-- ✅ `build.ps1 -Ui mew [-Publish|-Aot]`：产物目录 `publish/mew-win-x64{,-aot}`，默认 `-Ui avalonia` 不变。
+- ✅ 当时加了 `build.ps1 -Ui mew`；**2026-11-22 删掉 Avalonia 后该开关已移除**，
+  产物固定 `publish/win-x64{,-aot}/xdm.exe`。
 - ✅ 体积/首帧/内存实测（3 次取中位，与 Avalonia 同档对比）进 `PROGRESS.md`。
-- ✅ 文档：`ARCHITECTURE.md §2.4 双前端`、`UI-DESIGN.md §12 MewUI 一致性约定`、`README` 前端开关与命令。
+- ✅ 文档：`ARCHITECTURE.md §2.1/2.2/2.4`、`UI-DESIGN.md §12`、`README` 命令与工程结构。
 
 **MewUI 测试工程的组成**
 

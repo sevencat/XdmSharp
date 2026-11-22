@@ -4,8 +4,6 @@
 param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Debug',
-    [ValidateSet('avalonia', 'mew')]
-    [string] $Ui = 'avalonia',
     [switch] $Test,
     [switch] $Publish,
     [switch] $Aot,
@@ -16,19 +14,10 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Push-Location $root
 
-# 双前端（ARCHITECTURE.md §2.1）：只有启动栈不同，Xdm.Core / Xdm.Ui.Shared 与测试完全共用。
-switch ($Ui) {
-    'avalonia' {
-        $appProject = 'src/Xdm.App/Xdm.App.csproj'
-        $publishDir = 'publish/win-x64'
-        $aotDir = 'publish/win-x64-aot'
-    }
-    'mew' {
-        $appProject = 'src/Xdm.App.Mew/Xdm.App.Mew.csproj'
-        $publishDir = 'publish/mew-win-x64'
-        $aotDir = 'publish/mew-win-x64-aot'
-    }
-}
+# 唯一前端：MewUI（Win32 + Direct2D）。产物统一叫 xdm.exe。
+$appProject = 'src/Xdm.App.Mew/Xdm.App.Mew.csproj'
+$publishDir = 'publish/win-x64'
+$aotDir = 'publish/win-x64-aot'
 
 try {
     dotnet build XdmSharp.sln -c $Configuration --nologo

@@ -1,22 +1,23 @@
 # Xdm 总体计划
 
 参考实现：`refcode/xdm-master`（XDM，Kotlin）。本项目目标是 Windows 下的普通 HTTP 下载器，
-C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
+C# + MewUI（Win32 + Direct2D）+ .NET 10，命名空间根 `Xdm`。产物 `xdm.exe`。
+
+> 2026-11-22：原 Avalonia 前端已删除，MewUI 成为唯一前端。下方 M0–M5 的历史记录保留原文
+> （带「Avalonia 版」字样），它们记录的是当时的验收事实；现状以 `ARCHITECTURE.md` / `README.md` 为准。
 
 ---
 
 ## 一、总体原则
 
 1. **界面先行**。先用假数据把主窗口、列表行、进度可视化、新建对话框、设置页跑通，再实现引擎。
-   理由：Avalonia 12 的控件/API 差异与本项目的列表虚拟化方案是唯一的不确定性来源，
-   先证实它，避免引擎写完后被 UI 方案推翻。
-2. **分层单向依赖**：`Xdm.Core` ← `Xdm.Ui` ← `Xdm.App`。`Core` 不引用 Avalonia，
-   `Ui` 不引用启动栈（SimdAIO 只在 `Xdm.App`），`App` 只做组装（启动链、DI、窗口生命周期）。
-   测试工程因此可以只依赖 `Ui`，跑得快、也不受渲染后端牵连。
-3. **渲染后端可替换**。首期用标准 Avalonia 桌面栈（Win32 + Skia）；
-   `Sevencat.Avalonia.SimdAIO`（纯托管 SimdSkia、无原生库）为预留后端，
-   切换只允许改 `src/Xdm.App/Program.cs` 与 App 的包引用。为此现在就要守的约束见
-   `ARCHITECTURE.md` §2.1/§2.2（不直接用 SkiaSharp、只用 Fluent 主题、不引 Desktop/Win32/Skia 等）。
+   理由：UI 框架的控件能力与列表虚拟化方案是唯一的不确定性来源，先证实它，
+   避免引擎写完后被 UI 方案推翻（这次换到 MewUI 也印证了：`Xdm.Core` 一行没改）。
+2. **分层单向依赖**：`Xdm.Core` ← `Xdm.Ui.Shared` ← `Xdm.Ui.Mew` ← `Xdm.App.Mew`。
+   `Core` 不引用 UI 框架，视图层不引用平台/后端（注册只在壳里），`App.Mew` 只做组装
+   （启动链、DI、窗口生命周期）。测试工程因此可以只依赖视图层，跑得快、也不受渲染后端牵连。
+3. **渲染栈可替换**。现行是 MewUI（`Win32Platform` + `Direct2DBackend`），切换点只在
+   `src/Xdm.App.Mew/Program.cs` 与壳的包引用；约束见 `ARCHITECTURE.md` §2.1。
 4. **借鉴设计，不逐行抄**。算法语义必须一致（`synced` 进度、`If-Range` 用 `Last-Modified`、
    Range 能力判定、拒绝分类），但 .NET 有更好的原语（`RandomAccess`、`SocketsHttpHandler`、
    `System.Text.Json`），能用框架替代的一律替代。
@@ -24,7 +25,7 @@ C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
    Kotlin 那边用 `ReentrantReadWriteLock` 保护分段表，锁内做状态迁移；C# 里 `lock` 不能跨
    `await`，一旦 async 化就要重写整套并发正确性论证，风险远大于收益。
 6. **一切可测**。引擎用自建 TCP 级假 HTTP 服务器测（可造畸形响应、断流、无视 Range）；
-   界面用 `Avalonia.Headless.XUnit` 测（无窗口断言控件树、模拟点击/输入）。见 `TESTING.md`。
+   视图用 `Xdm.Ui.Mew.Tests` 测（不建窗口遍历控件树、命令桥直接调 `CanExecute/Execute`）。见 `TESTING.md`。
 7. **每个里程碑收尾必做**：`dotnet build`（0 警告）+ `dotnet test`（全绿）+ 手工冒烟，
    结果记入 `PROGRESS.md`。
 
@@ -60,6 +61,9 @@ C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
 ## 三、里程碑（界面优先）
 
 > 依赖关系：M0 → M1 → M2；M3 独立于界面，可与 M1/M2 并行；M4 需要 M1 + M3。
+
+> **M0–M2 的条目是 Avalonia 版的验收记录**（该前端已于 2026-11-22 删除）。同名能力在 MewUI 版上
+> 已由 `docs/PLAN-MEWUI.md` 的 S1–S5 重新交付，数字见 `PROGRESS.md`。保留原文只为追溯决策顺序。
 
 ### M0 地基（0.5–1 天）✔ 已完成（2026-11-22）
 
@@ -154,12 +158,12 @@ C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
 
 - ✅ 限速（令牌桶，全局限速跨所有任务）、代理、自定义头
 - ✅ 错误分类与中文文案、失败重试退避
-- ✅ 单实例 + 命令行传入 URL（2026-11-22，两个前端都接）：命名 Mutex 决定主实例，
+- ✅ 单实例 + 命令行传入 URL（2026-11-22）：命名 Mutex 决定主实例，
   命名管道把第二个实例的链接递给主实例（空载荷=只激活窗口）；`LaunchOptions` 负责从命令行捞 URL。
   键按库路径哈希、带 `Local\` 前缀，所以不同 `--db` 的实例可并存
-- ☐ 完成通知（任务下载完提示/任务栏闪烁）——需要托盘图标，单独一轮做
+- ✅ 删除 Avalonia 前端、MewUI 定为唯一前端（2026-11-22），产物统一 `xdm.exe`
+- ☐ 托盘图标 + 完成通知（下载完气泡提示、双击打开、右键菜单）——M6 收尾
 - ☐ `PartAllocation`（无稀疏文件系统预填充）——低优先级，仅稳定性需要时做
-- ✅ 可选：把渲染后端切换成 `Sevencat.Avalonia.SimdAIO` 验证（已完成，见 PROGRESS）
 
 ### V2 HF 模型下载（约 6–8 人日）
 
@@ -215,12 +219,12 @@ C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
-| 大量进度条刷新导致掉帧（Skia 软件光栅 / 将来 SimdSkia） | 体验差 | 进度按 ≥1% 变化才更新；行内进度条用轻量自绘控件；M1 用 1000 行假数据压测；任务量大时改**队列 + 200ms 批量 flush**（`ARCHITECTURE.md` §6.1：字典索引、每帧汇总只算一次、结构变化也合并） |
+| 大量进度条刷新导致掉帧（Direct2D，软件 WARP 回退时更明显） | 体验差 | 进度按 ≥1% 变化才更新；行内进度条用轻量自绘控件；用 1000 行假数据压测；任务量大时改**队列 + 200ms 批量 flush**（`ARCHITECTURE.md` §6.1：字典索引、每帧汇总只算一次、结构变化也合并） |
 | exe 目录不可写导致任务库建不出来（装在 `Program Files`） | 启动即失败 | 回退 `%LOCALAPPDATA%\Xdm\xdm.db` 并提示，不弹窗阻断（`ARCHITECTURE.md` §7.1） |
 | 用户只备份 `xdm.db`、漏掉 `.lock` / `.pidx` | 丢最新进度 | 文档写明"三件一起拷"（`ARCHITECTURE.md` §7.1） |
-| Avalonia 12 与 11 的 API 差异缺乏资料 | 试错成本 | 以本机包内 `Avalonia.xml`/源码为准，不照抄 11.x 示例 |
+| Aprillz.MewUI 是 0.x，次版本可能破坏性变更 | 升级返工 | 版本锁死；升级当独立任务，跑全量测试 + 端到端截图对比（`ARCHITECTURE.md` §2.1） |
 | 并发分段状态机移植出错（暂停/取消/竞速竞态） | 静默损坏文件 | 保留阻塞线程模型；按 `TESTING.md` 矩阵逐条对齐；段级断言区间不重叠 |
-| 将来切 SimdAIO 时发现大量 Skia 直连代码 | 切换成本 | 现在就守 `ARCHITECTURE.md` §2.2 的约束；`Xdm.Ui` 不引启动栈 |
+| 将来换 UI 框架时发现业务耦合视图 | 切换成本 | 守 `ARCHITECTURE.md` §1 的约束；`Xdm.Ui.Shared` 不引任何 UI 框架（这次换到 MewUI 时零改动） |
 | 参考实现 GPL-3.0 | 许可传染 | 本项目已采用 GPL-3.0；文件头标注衍生来源 |
 | 首期把任务模型写死成"单 URL 单文件"，V2/V3 才改 | 大范围返工（schema/UI/引擎签名） | 首期即落 `TaskKind` + `parent_id` + `files` 表 + 两级任务模型（`ARCHITECTURE.md` §12.1） |
 | 引擎耦合 HTTP 状态码（429/403 直接进调度逻辑） | BT/镜像站无法复用 | `SourceOutcome` 语义化枚举，HTTP 语义只留在 `RangeHttpClient` 内部 |

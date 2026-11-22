@@ -1,6 +1,6 @@
 # 测试策略
 
-命名空间根 `Xdm`，工程 `Xdm.Core.Tests` / `Xdm.Ui.Tests`，目标框架 `net10.0`。
+命名空间根 `Xdm`，工程 `Xdm.Core.Tests` / `Xdm.Ui.Mew.Tests`，目标框架 `net10.0`。
 
 ## 1. 分层
 
@@ -8,10 +8,11 @@
 |---|---|---|---|
 | L1 单元 | `Xdm.Core.Tests` | 文件名推导、重名策略、退避算法、令牌桶、进度滑动窗口、JSON 状态读写 | 无网络（临时目录除外） |
 | L2 引擎集成 | `Xdm.Core.Tests` | 真实 HTTP 流程，跑自建 TCP 假服务器 | `TcpListener` 本地回环 |
-| L3 界面 | `Xdm.Ui.Tests` | 视图结构、绑定、命令、交互 | `Avalonia.Headless.XUnit`（无窗口） |
-| L4 手工 | — | 大文件、真实网络、断电恢复、发布产物 | 人工 |
+| L3 视图 | `Xdm.Ui.Mew.Tests` | 控件树结构、文案、命令桥、对话框、主题 token | 无需窗口（布局类按需注册后端） |
+| L4 手工 | — | 大文件、真实网络、断电恢复、发布产物、视觉截图 | 人工 |
 
-原则：L1/L2/L3 必须能在无网络、无桌面窗口的机器上全绿（CI 可跑）。
+原则：L1/L2/L3 必须能在无网络、无桌面窗口的机器上全绿（CI 可跑）；只有布局类用例可能
+因注册不到 Direct2D 后端而 `Assert.Skip`，不算失败。
 
 ---
 
@@ -118,146 +119,114 @@ public sealed class FileBehavior
 
 ---
 
-## 4. 界面测试（Avalonia Headless）
+## 4. 视图层测试（MewUI）
 
-首期渲染后端是 SimdAIO（`Avalonia` + `Sevencat.Avalonia.SimdAIO`），**AIO 不进测试进程**：
-测试工程只引用 `Xdm.Ui` + `Xdm.Core`，Headless 用官方包，理由见 4.1 的注释。
+MewUI 0.22 **没有 Headless 宿主**：`Measure/Arrange` 需要一个真实渲染后端，`Show()` 会真开窗口。
+所以测试分两档：
+
+1. **结构断言**（绝大多数）：不 `Show()` 的控件树就是普通对象图，可以直接构造、遍历、查文案。
+2. **布局断言**（少数）：按需注册 Win32 + Direct2D 后端后 `Measure`，注册失败就 `Assert.Skip`。
 
 ### 4.1 工程配置
 
 ```xml
-<!-- tests/Xdm.Ui.Tests/Xdm.Ui.Tests.csproj -->
+<!-- tests/Xdm.Ui.Mew.Tests/Xdm.Ui.Mew.Tests.csproj -->
 <ItemGroup>
-  <PackageReference Include="Avalonia.Headless.XUnit" Version="12.1.6" />
-  <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.6" />
   <PackageReference Include="xunit.v3" Version="3.2.2" />
   <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" />
   <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
+  <PackageReference Include="Aprillz.MewUI.Platform.Win32" Version="0.22.1" />
+  <PackageReference Include="Aprillz.MewUI.Backend.Direct2D" Version="0.22.1" />
 </ItemGroup>
 <ItemGroup>
-  <ProjectReference Include="..\..\src\Xdm.Ui\Xdm.Ui.csproj" />
-  <ProjectReference Include="..\..\src\Xdm.Core\Xdm.Core.csproj" />
+  <ProjectReference Include="..\..\src\Xdm.Ui.Mew\Xdm.Ui.Mew.csproj" />
 </ItemGroup>
 ```
 
-> 为什么仍不引用 `Xdm.App`：App 带 SimdAIO（合并了 Win32/OpenGL/MicroCom，禁用官方
-> Desktop/Win32/Skia），而 Headless 自带一套官方平台实现，**两者同进程必然冲突**。
-> 测试只依赖 `Xdm.Ui`，所以 AIO 改动完全不影响测试；顺带测试跑得更快。
-> Ui 测试需要主题，故直接引用同版本的 `Avalonia.Themes.Fluent`（只在测试工程，不进 App）。
+> 只依赖 `Xdm.Ui.Mew`，**不引 `Xdm.App.Mew`**：壳里的平台/后端注册是进程级全局状态，
+> 测试要自己控制注册时机（且允许跳过）。
 
-### 4.2 应用装配
+### 4.2 必须关并行
 
 ```csharp
-// tests/Xdm.Ui.Tests/TestAppBuilder.cs
-using Avalonia;
-using Avalonia.Headless;
-using Avalonia.Themes.Fluent;
-
-[assembly: AvaloniaTestApplication(typeof(Xdm.Ui.Tests.TestAppBuilder))]
-
-namespace Xdm.Ui.Tests;
-
-public static class TestAppBuilder
-{
-    public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<TestApp>()
-        .UseHeadless(new AvaloniaHeadlessPlatformOptions
-        {
-            UseHeadlessDrawing = true,   // 不接 Skia：纯结构测试
-        });
-}
-
-public sealed class TestApp : Application
-{
-    public override void Initialize() => Styles.Add(new FluentTheme());
-}
+// tests/Xdm.Ui.Mew.Tests/AssemblyInfo.cs
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
 ```
+
+MewUI 的控件**不是线程安全的**：父子关系建立、继承属性刷新都假定单线程。并行跑会让
+`RefreshInheritedSubtree` 抛 `ArgumentOutOfRangeException`（踩过，见 `PLAN-MEWUI.md` 坑 23）。
 
 ### 4.3 测试写法
 
 ```csharp
-using Avalonia.Controls;
-using Avalonia.Threading;
-using Xdm.Core.Downloads;
-using Xdm.Ui.ViewModels;
-using Xdm.Ui.Views;
-
-namespace Xdm.Ui.Tests;
-
 public sealed class MainWindowTests
 {
-    [AvaloniaFact]
-    public void 空列表显示空态提示()
+    [Fact]
+    public void 主窗口包含工具栏与分类()          // 纯结构，不 Show
     {
-        var vm = new MainWindowViewModel(FakeTasks.Empty());
-        var window = new MainWindow { DataContext = vm };
-        window.Show();
-        Dispatcher.UIThread.RunJobs();
-
-        var hint = window.FindControl<TextBlock>("Main_EmptyHint");
-        Assert.NotNull(hint);
-        Assert.True(hint!.IsVisible);
+        var window = new MainWindow(viewModel);
+        var texts = VisualTree.Texts(window);      // 遍历子树收集文案
+        Assert.Contains("新建", texts);
     }
 
-    [AvaloniaFact]
-    public void 已暂停任务时恢复按钮可用()
+    [Fact]
+    public void 列表行高度符合规范()              // 需要后端
     {
-        var vm = new MainWindowViewModel(FakeTasks.One(DownloadStatus.Paused));
-        vm.SelectedIndex = 0;
-        var window = new MainWindow { DataContext = vm };
-        window.Show();
-        Dispatcher.UIThread.RunJobs();
-
-        Assert.True(window.FindControl<Button>("Main_ResumeButton")!.IsEnabled);
+        TestPlatform.EnsureRegistered();           // 失败即 Assert.Skip
+        var row = new RowHost(...);
+        row.Measure(new Size(600, double.PositiveInfinity));
+        Assert.Equal(MewTheme.RowHeight, row.DesiredSize.Height);
     }
 }
 ```
 
 规则：
 
-- 一律 `[AvaloniaFact]` / `[AvaloniaTheory]`，**不能**用 `[Fact]`（Dispatcher 未初始化会炸）。
-- 控件可见性/虚拟化容器需 `window.Show()` + `Dispatcher.UIThread.RunJobs()`。
-- 时间推进用 `AvaloniaHeadlessPlatform.ForceRenderTimerTick()`，**禁止 `Thread.Sleep`**。
-- 外部副作用（打开文件、打开目录、系统对话框）全部走注入接口，测试里换 `FakeShellService`。
+- **一律 `[Fact]`**（没有 `[AvaloniaFact]` 这种宿主钩子）；需要后端的用例显式调 `TestPlatform.EnsureRegistered()`。
+- 文案三处存放：`TextBlock.Text`、`AccessText.RawText`（内部类型，只能反射）、`TextBox.Text`——
+  断言文案一律走 `VisualTree.Texts`，别自己找控件（`AccessText` 是 internal）。
+- 命令测 `MewCommandBridge.CanExecute()/Execute()`，不模拟鼠标。
+- 外部副作用（打开文件/目录、系统对话框）走注入接口，测试换假实现。
 
 ### 4.4 能做与不能做
 
 | 能做 | 不能做 / 限制 |
 |---|---|
-| 控件树、`x:Name` 查找、绑定值断言 | 像素级比对（`UseHeadlessDrawing=true` 无真实光栅） |
-| 点击 / 键盘输入 / 焦点 / 选择 | 字体度量与排版精确值 |
-| `IsVisible`、`IsEnabled`、样式类、主题变体切换 | 真实渲染性能（只能人工测） |
-| 命令执行、`INotifyPropertyChanged` 生效 | 拖放模拟（改走 ViewModel 命令间接测） |
-| 虚拟化容器生成（给足窗口高度） | 托盘、系统通知（M6 用接口打桩） |
+| 控件树结构、文案、`IsEnabled`、颜色 token | 像素级比对（无 headless 光栅） |
+| 命令桥 `CanExecute`/`Execute` 与 VM 联动 | 真实点击/键盘输入（可调内部方法，但不是端到端） |
+| 对话框标题栏/按钮布局（`Measure` 后） | 列表行内容（`ListBox` 不为每行建元素，只能截图验收） |
+| 主题 token 全量（`MewTheme` 与规范对齐） | 托盘、系统通知（需要真实桌面，用接口打桩） |
 
-**截图基线**：`CaptureRenderedFrame()` 需要真实渲染后端（Skia）。
-首期不额外引 `Avalonia.Skia` 到测试工程，故不做视觉回归；真要做就单建
-`Xdm.Ui.Snapshot.Tests` 引用 `Avalonia.Skia`，只在本地/可选 CI 跑（P2）。
-注意该工程将来无法与 SimdAIO 后端共用输出目录。
+**视觉回归**：MewUI 没有 `CaptureRenderedFrame` 这类 API。视觉验收靠 `PROGRESS.md` 里的
+端到端截图脚本（启动 → 截图 → 人工比对），不进 CI。
 
-### 4.5 M2 交付的界面测试清单
+### 4.5 交付的视图层测试清单（42 条）
 
-| 对象 | 用例 |
+| 文件 | 覆盖 |
 |---|---|
-| 主窗口 | 空态提示可见；3 条假数据 → `Main_TaskList.ItemCount == 3`；行内进度文本 `76%`；各状态徽标文案；分类过滤后计数正确；搜索过滤；多选时删除按钮可用 |
-| 新建下载 | 空 URL 阻断；非法 scheme 阻断；三行 URL → 按钮显示`批量添加（3）`；目录不存在 → 错误提示可见 |
-| 进度详情 | 4 段快照 → 4 个段项；>200 段 → 切聚合视图；速度曲线控件有点数据 |
-| 设置 | 改段数 → VM 属性变化；取消 → 不触发保存；越界（0 / 300）被钳制 |
-| 交互 | 双击已完成行触发 `OpenFileCommand`（`FakeShellService` 记录调用）；`Del` 弹出确认框 |
+| `MainWindowTests` | 结构/工具栏/分类/空态、VM 绑定、命令可用性 |
+| `MewCommandBridgeTests` | `ICommand` → `Command` 的 CanExecute/Execute 映射 |
+| `DialogChromeTests` | 各对话框标题栏、按钮区、尺寸 |
+| `NewDownloadDialogTests` | 预填 URL、多行、目录/段数校验、`Submit()` 行为 |
+| `EditBoxTests` | 中文右键菜单项 |
+| `MewThemeTests` | 色值/尺寸 token 与 `UI-DESIGN.md` 对齐 |
+| `TitleBarChromeTests` | 自绘标题栏的拖拽区与按钮 |
+| `LayoutTests` | 依赖后端的度量（失败 `Assert.Skip`） |
 
 ---
 
 ## 5. 命令
 
 ```powershell
-dotnet test                                     # 全部
-dotnet test tests/Xdm.Core.Tests                # 引擎 + 单元
-dotnet test tests/Xdm.Ui.Tests                  # 界面（无窗口）
+dotnet test                                     # 全部（197 条）
+dotnet test tests/Xdm.Core.Tests                # 引擎 + 单元（155 条）
+dotnet test tests/Xdm.Ui.Mew.Tests              # 视图层（42 条）
 dotnet test --filter "FullyQualifiedName~ResumeTests"
 dotnet test --collect:"XPlat Code Coverage"
 ```
 
 覆盖率目标：`Xdm.Core` ≥ 80% 行覆盖，引擎类（`DownloadEngine` / `SegmentRunner`）≥ 90%；
-`Xdm.Ui` 覆盖 `UI-DESIGN.md` 第 9 节列出的所有可断言点。
+`Xdm.Ui.Mew` 覆盖 `UI-DESIGN.md` 第 9 节列出的所有可断言点。
 
 ---
 

@@ -57,6 +57,9 @@ internal sealed class MewRuntime : IDisposable
 
     public MainWindowViewModel ViewModel { get; }
 
+    /// <summary>引擎事件桥；<see cref="ConnectEngine"/> 之前为 <c>null</c>（演示模式永远为 <c>null</c>）。</summary>
+    public MewDownloadBridge? Bridge => _bridge;
+
     public AppSettings Settings => _settings;
 
     /// <summary>最近一次落库失败的原因（引擎不会因此中断下载，只在这里暴露）。</summary>

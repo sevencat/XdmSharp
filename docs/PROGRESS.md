@@ -7,11 +7,11 @@
 | — | 开工文档（README / PLAN / ARCHITECTURE / UI-DESIGN / TESTING） | 完成 | 2026-11-22 |
 | M0 | 地基：solution、分层工程、启动链、Headless 跑通、发布 | 完成 | 2026-11-22 |
 | M1 | 主界面骨架（假数据） | 完成 | 2026-11-22 |
-| M2 | 界面测试基建（Avalonia.Headless.XUnit） | 完成（随 M1 落地） | 2026-11-22 |
+| M2 | 界面测试基建 | 完成（随 M1 落地；Avalonia 版测试已随前端删除，同能力见 MewUI S5） | 2026-11-22 |
 | M3 | 引擎核心（单段 → 多段 → 续传） | 完成（等分切段；动态二分/接管/竞速转入 M6） | 2026-11-22 |
 | M4 | 接线（Manager + 进度上屏） | 完成（进度详情窗口待做） | 2026-11-22 |
 | M5 | 任务库与队列（PureDb） | 完成（并发压测待补） | 2026-11-22 |
-| M6 | 打磨（限速/代理/通知/可选切 SimdAIO） | 进行中（限速/代理/设置/自绘标题栏已完成；重试退避/通知/单实例/托盘/进度详情窗口待做） | — |
+| M6 | 打磨（限速/代理/通知/单实例） | 进行中（限速/代理/设置/标题栏/单实例/命令行 URL 已完成，Avalonia 前端已删除；托盘+完成通知/进度详情窗口/PartAllocation 待做） | — |
 
 状态取值：`未开始` / `进行中` / `完成` / `阻塞`（阻塞须在日志里写明原因）。
 
@@ -19,18 +19,41 @@
 
 | # | 事项 | 结论 | 定案时间 |
 |---|---|---|---|
-| 1 | 主列表用 `DataGrid` 还是 `ListBox` + `ItemTemplate` | **`ListBox` + `ItemTemplate` + `VirtualizingStackPanel`**；不引 `Avalonia.Controls.DataGrid` 包 | 2026-11-22 |
-| 2 | 是否加视觉回归工程（截图基线，需 Avalonia.Skia） | 待定，优先不做 | — |
-| 3 | `PartAllocation`（无稀疏文件预填充）是否进首期 | 待定，倾向 M6 | — |
-| 4 | 渲染后端 | **首期即用 `Sevencat.Avalonia.SimdAIO 12.1.6.2`**；回退官方 Desktop 栈只改 `Program.cs` + `Xdm.App.csproj` | 2026-11-22 |
+| 1 | 主列表用什么容器 | **MewUI `ListBox`**（虚拟化即绘制，不为每行建元素）；不引表格控件 | 2026-11-22 |
+| 2 | 是否加视觉回归（截图基线） | 不做自动化；用端到端截图脚本人工比对 | 2026-11-22 |
+| 3 | `PartAllocation`（无稀疏文件预填充）是否进首期 | 待定，倾向 M6 尾 | — |
+| 4 | 渲染栈 | **MewUI（`Win32Platform` + `Direct2DBackend`）唯一**；Avalonia 前端已于 2026-11-22 删除 | 2026-11-22 |
 | 5 | V3 BT 引擎：引 `MonoTorrent`（MIT）还是自研最小实现 | 待 V3 立项时评估；优先引库，自研仅作兜底 | — |
 | 6 | V2 HF 是否需要 `hf_transfer` 式多连接加速 | 待 V2 实测 CDN 单连接吞吐后定 | — |
 | 7 | 父子任务的列表呈现（展开 / 独立窗口 / 折叠统计） | 首期只做单行，但行模板预留子行区 | — |
 | 8 | 任务库位置与文件名 | **`AppContext.BaseDirectory\xdm.db`**（exe 同目录，绿色版）；不可写回退 `%LOCALAPPDATA%\Xdm\`；命令行 `--db <path>` 覆盖（优先级最高） | 2026-11-22 |
-| 9 | 发布形态：framework-dependent 单文件（12MB）/ self-contained / NativeAOT（30MB） | 默认 framework-dependent（需 .NET 10）；另提供 AOT 档 `build.ps1 -Aot`（30MB 单 exe、目标机零依赖；构包需 MSVC 链接器 + Windows SDK） | 2026-11-22 |
+| 9 | 发布形态：framework-dependent 目录（4MB）/ self-contained / NativeAOT（15MB） | 默认 framework-dependent（需 .NET 10）；另提供 AOT 档 `build.ps1 -Aot`（15MB 单 exe、目标机零依赖；构包需 MSVC 链接器 + Windows SDK） | 2026-11-22 |
 | 10 | 同时下载/恢复的任务量大时，界面怎么刷 | **待更新项进队列 → `DispatcherTimer` 每 200ms 在 UI 线程批量 flush**；同时把行定位改字典索引、每帧汇总只算一次、结构变化合并（方案见 `ARCHITECTURE.md` §6.1）。当前是 250ms 单条 drain，够用到百级任务 | 2026-11-22（方案定，未实现） |
 
 ## 日志
+
+### 2026-11-22 · 删除 Avalonia 前端，MewUI 成为唯一前端
+
+- **删除**：`src/Xdm.App`（7 个文件 + `Assets/xdm.ico`）、`src/Xdm.Ui`（视图/样式/转换器）、
+  `tests/Xdm.Ui.Tests`（65 条 Headless 测试）。`XdmSharp.sln` 同步移除三个工程
+  （用 `dotnet sln remove`，不动手改 GUID 块）。
+- **保留 .Mew 命名**：目录/命名空间仍是 `Xdm.App.Mew` / `Xdm.Ui.Mew` / `Xdm.Ui.Mew.Tests`
+  （用户决定：名字指明启动栈，不用去掉），只把**产物**改名：`AssemblyName` `xdm-mew` → `xdm`，
+  发布产物统一 `xdm.exe`。
+- **资产迁移**（`git mv`，历史不断）：
+  `src/Xdm.Ui/Assets/xdm-logo.png` → `src/Xdm.Ui.Mew/Assets/xdm-logo.png`（改为本工程嵌入资源，
+  `LogicalName` 不变）；`src/Xdm.App/Assets/xdm.ico` → `src/Xdm.App.Mew/Assets/xdm.ico`（`ApplicationIcon`）。
+  `tools/make-icons.ps1` 的默认输出路径同步。
+- **build.ps1**：去掉 `-Ui avalonia|mew` 开关（只剩一个前端），固定
+  `publish/win-x64`（4.0 MB 目录）与 `publish/win-x64-aot`（15.4 MB 单 exe）。
+- **文档**：`README`（技术栈/工程结构/命令/体积/测试条数）、`ARCHITECTURE`（§1 依赖图、§2 工程表、
+  §2.1 渲染栈重写为 MewUI、"§2.2 为什么删掉 Avalonia"决策记录与四档实测、§7.1/§7.3/§9/§12 措辞）、
+  `UI-DESIGN`（顶部实现说明 + §2 窗口清单 + §3/§4/§9/§10/§11 去 Avalonia 化 + §12 改为 MewUI 唯一实现）、
+  `TESTING`（§4 整节重写为 MewUI 视图层测试：无 Headless、必须关并行、`TestPlatform` 按需注册、
+  文案三处来源）、`PLAN`（总体原则/风险表改口径，M0–M2 标为 Avalonia 版历史记录）、
+  `PLAN-MEWUI`（标"已完成并归档"，S5 的 `-Ui` 开关记录同步失效说明）。
+- **回归**：`dotnet build XdmSharp.sln` 0 error / 0 warning；`dotnet test` **197 条全绿**
+  （Core 155 + Ui.Mew 42）；`src/Xdm.App.Mew/bin/Debug/net10.0/xdm.exe` 生成正常。
 
 ### 2026-11-22 · M6 单实例 + 命令行传 URL（两个前端同时接）
 

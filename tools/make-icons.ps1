@@ -5,8 +5,8 @@
 
 .DESCRIPTION
     产物：
-      src/Xdm.Ui/Assets/xdm-logo.png   256×256，透明底，裁到内容外围，窗口 Icon + 标题栏 / 关于页
-      src/Xdm.App/Assets/xdm.ico       16/20/24/32/40/48/64/96/128/256 十帧 PNG 压缩图标（exe / 任务栏）
+      src/Xdm.Ui.Mew/Assets/xdm-logo.png   256×256，透明底，裁到内容外围，标题栏 / 关于页
+      src/Xdm.App.Mew/Assets/xdm.ico       16/20/24/32/40/48/64/96/128/256 十帧 PNG 压缩图标（exe / 任务栏）
 
     处理方式：
       1. 从四边洪泛标记「与白色连通」的背景（原图底色是 240~255 的渐变，不能用固定阈值一刀切）；
@@ -21,8 +21,8 @@
 #>
 param(
     [string] $Source = (Join-Path (Split-Path -Parent $PSScriptRoot) 'logo.png'),
-    [string] $LogoOut = (Join-Path (Split-Path -Parent $PSScriptRoot) 'src/Xdm.Ui/Assets/xdm-logo.png'),
-    [string] $IconOut = (Join-Path (Split-Path -Parent $PSScriptRoot) 'src/Xdm.App/Assets/xdm.ico'),
+    [string] $LogoOut = (Join-Path (Split-Path -Parent $PSScriptRoot) 'src/Xdm.Ui.Mew/Assets/xdm-logo.png'),
+    [string] $IconOut = (Join-Path (Split-Path -Parent $PSScriptRoot) 'src/Xdm.App.Mew/Assets/xdm.ico'),
     [int] $LogoSize = 256
 )
 

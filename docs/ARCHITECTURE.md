@@ -1,31 +1,31 @@
 # 架构设计
 
-命名空间根：`Xdm`。工程/程序集：`Xdm.Core`、`Xdm.Ui.Shared`、`Xdm.Ui`、`Xdm.Ui.Mew`、`Xdm.App`、
-`Xdm.App.Mew`、`Xdm.Core.Tests`、`Xdm.Ui.Tests`。
+命名空间根：`Xdm`。工程/程序集：`Xdm.Core`、`Xdm.Ui.Shared`、`Xdm.Ui.Mew`、`Xdm.App.Mew`、
+`Xdm.Core.Tests`、`Xdm.Ui.Mew.Tests`。
 目标框架：`net10.0`（不写 `-windows`）。
+
+> 工程名里的 `.Mew` 指启动栈（MewUI），**产物**统一叫 `xdm.exe`（`AssemblyName` 与工程名解耦）。
+> 2026-11-22 删除了原 Avalonia 前端（`Xdm.App` / `Xdm.Ui` / `Xdm.Ui.Tests`），
+> 历史记录见 `PROGRESS.md`，迁移过程见 `PLAN-MEWUI.md`。
 
 ## 1. 分层与依赖
 
 ```
-Xdm.App (WinExe)                        ← Avalonia 壳：启动链、DI、窗口生命周期、SimdAIO
-Xdm.App.Mew (WinExe)                    ← MewUI 壳：Win32 + Direct2D（并行前端，见 PLAN-MEWUI.md）
-   ├── Xdm.Ui (classlib)                ← Avalonia 视图 / 样式；不引启动栈
+Xdm.App.Mew (WinExe)                    ← 壳：平台/后端注册、组合根、窗口生命周期、单实例
+   ├── Xdm.Ui.Mew (classlib)            ← MewUI 视图（code-first）；不引平台与后端
    │      └── Xdm.Ui.Shared (classlib)  ← ViewModel / Service / 格式化；不引任何 UI 框架
    │              └── Xdm.Core
-   ├── Xdm.Ui.Mew (classlib)            ← MewUI 视图；只依赖 Shared，不引启动栈
-   │      └── Xdm.Ui.Shared
    └── Xdm.Core (classlib)              ← 引擎 / HTTP / 存储 / 任务库；不引任何 UI 框架
           └── (无)
 ```
 
 单向依赖，禁止反向引用。判定标准：
 
-- `Xdm.Core` 出现 `using Avalonia;` → 错误
-- `Xdm.Ui.Shared` 出现 `using Avalonia;` / `using Aprillz.MewUI;` → 错误（换前端时它必须零改动）
-- `Xdm.Ui` 出现 `using Avalonia.Desktop` / `Avalonia.Win32` / `SkiaSharp` / `SimdSkia` → 错误
+- `Xdm.Core` 出现 `using Aprillz.MewUI;` → 错误
+- `Xdm.Ui.Shared` 出现 `using Aprillz.MewUI;` → 错误（换 UI 框架时它必须零改动）
 - `Xdm.Ui.Mew` 出现 `Win32Platform.Register` / `Direct2DBackend.Register` → 错误（平台注册只属于壳）
-- `Xdm.App` / `Xdm.App.Mew` 里出现业务代码（解析 HTTP、拼 SQL） → 错误
-- 两个视图工程互相引用 → 错误（前端间不共享视图代码，只共享 `Xdm.Ui.Shared`）
+- `Xdm.App.Mew` 里出现业务代码（解析 HTTP、拼 SQL） → 错误
+- 新增控件/对话框只能落在 `Xdm.Ui.Mew`，壳里不写视图代码
 
 ## 2. 工程与包引用
 
@@ -33,12 +33,9 @@ Xdm.App.Mew (WinExe)                    ← MewUI 壳：Win32 + Direct2D（并�
 |---|---|---|---|
 | `Xdm.Core` | Library | net10.0 | PureDb |
 | `Xdm.Ui.Shared` | Library | net10.0 | →Core |
-| `Xdm.Ui` | Library | net10.0 | Avalonia, →Ui.Shared, →Core |
 | `Xdm.Ui.Mew` | Library | net10.0 | Aprillz.MewUI.Core, →Ui.Shared, →Core |
-| `Xdm.App` | WinExe | net10.0 | Avalonia, Sevencat.Avalonia.SimdAIO, →Ui, →Core |
-| `Xdm.App.Mew` | WinExe | net10.0 | Aprillz.MewUI.Backend.Direct2D, Aprillz.MewUI.Platform.Win32, →Ui.Mew, →Ui.Shared, →Core |
+| `Xdm.App.Mew` | WinExe（`xdm.exe`） | net10.0 | Aprillz.MewUI.Backend.Direct2D, Aprillz.MewUI.Platform.Win32, →Ui.Mew, →Ui.Shared, →Core |
 | `Xdm.Core.Tests` | Exe（xunit v3） | net10.0 | xunit.v3, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk, →Core |
-| `Xdm.Ui.Tests` | Exe（xunit v3） | net10.0 | xunit.v3, Avalonia.Headless.XUnit, Avalonia.Themes.Fluent, →Ui, →Core |
 | `Xdm.Ui.Mew.Tests` | Exe（xunit v3） | net10.0 | xunit.v3, Aprillz.MewUI.Platform.Win32, Aprillz.MewUI.Backend.Direct2D, →Ui.Mew |
 
 `Directory.Packages.props` 统一版本；`Directory.Build.props` 统一
@@ -46,68 +43,59 @@ Xdm.App.Mew (WinExe)                    ← MewUI 壳：Win32 + Direct2D（并�
 
 `RuntimeIdentifier` 不写进 csproj（首期也不需要），只在 `dotnet publish -r win-x64` 时给。
 
-### 2.1 渲染后端：SimdAIO（首期即采用）
+### 2.1 渲染栈：MewUI（Win32 + Direct2D）
 
-首期直接上 `Sevencat.Avalonia.SimdAIO 12.1.6.2`（纯托管 SimdSkia，Windows x64）。该包已把
-SimdSkia 版 `Avalonia.Win32` / `Avalonia.Win32.Automation` / `Avalonia.OpenGL` / `Avalonia.MicroCom`
-以及 SkiaSharp 命名空间兼容门面合并成单个 `Avalonia.SimdAio.dll`，并附带保持独立身份的
-`Avalonia.Themes.Fluent.dll`。所以工程**只要两个包**：
+视图层用 `Aprillz.MewUI` 0.22（纯托管、code-first，没有 XAML 与资源字典）。三个包各司其职：
 
-```xml
-<PackageReference Include="Avalonia" />
-<PackageReference Include="Sevencat.Avalonia.SimdAIO" />
-```
+| 包 | 归属工程 | 作用 |
+|---|---|---|
+| `Aprillz.MewUI.Core` | `Xdm.Ui.Mew` | 控件 / 布局 / 绘制 / 输入；不含平台与后端 |
+| `Aprillz.MewUI.Platform.Win32` | `Xdm.App.Mew` | 窗口、消息循环、DPI、剪贴板 |
+| `Aprillz.MewUI.Backend.Direct2D` | `Xdm.App.Mew` | 渲染后端（Direct2D → WARP 软件回退） |
 
-启动链（`src/Xdm.App/Program.cs`，唯一启动点）：
+启动链（`src/Xdm.App.Mew/Program.cs`，唯一启动点）：
 
 ```csharp
-public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
-    .UseStandardRuntimePlatformSubsystem()
-    .UseWin32()
-    // SimdSkia 走软件 framebuffer；Win32 默认 [AngleEgl, Software]，必须只留 Software
-    .With(new Win32PlatformOptions { RenderingMode = new[] { Win32RenderingMode.Software } })
-    .UseSimdSkia(static options => SimdSkiaGpuOptions.UseGpuPreferred(options)) // Direct2D 优先，失败回退 CPU
-    .LogToTrace();
+Win32Platform.Register();
+Direct2DBackend.Register();
+// …构造 MainWindow…
+Application.Run(window, onStartup);   // onStartup 里才接引擎桥（DispatcherTimer 需要 UI 线程）
 ```
 
-**红线**（包内 targets 会对 Win32/Skia 冲突发警告，而本项目 `TreatWarningsAsErrors=true`，引错即构建失败）：
+**红线**：
 
 | 禁止 | 原因 |
 |---|---|
-| `Avalonia.Desktop` / `Avalonia.Win32` / `Avalonia.Skia` / `Avalonia.HarfBuzz` | 与合并包同名类型冲突（CS0433） |
-| `Avalonia.Themes.Fluent` 包 | AIO 已在 `lib/net10.0/` 附带同版本 |
-| `Avalonia.Fonts.Inter` / `WithInterFont()` | AIO 无 Inter，走系统字体栈 |
-| `UsePlatformDetect()` / `UseSimdSkiaDesktop()` | 前者接回官方 Skia，后者要求四平台宿主 |
-| 真 `SkiaSharp` / `SimdSkia.Compatibility` 包 | 门面已并入，重复引用即同名类型冲突 |
+| 引 `Aprillz.MewUI.Windows` meta 包 | 会把 Gdi / MewVG 后端一起拖进产物（+~550 KB） |
+| 在 `Xdm.Ui.Mew` 里调 `Win32Platform.Register()` / `Direct2DBackend.Register()` | 平台注册只属于壳；测试工程自己按需注册并允许 `Assert.Skip` |
+| 视图层依赖 `Aprillz.MewUI.Platform.Win32` | 视图必须能在无后端的环境里构造（测试只用结构断言） |
+| 依赖 0.x 的隐式默认值（主题回退、默认样式） | 次版本可能改动；升级当独立任务，跑全量测试 + 截图对比 |
 
-输出目录自检（`build.ps1` 后肉眼核对）：有 `Avalonia.SimdAio.dll`，
-**没有** `Avalonia.Win32.dll` / `Avalonia.Skia.dll` / `SkiaSharp.dll`，也没有任何 `runtimes/**/native/*.dll`。
+输出目录自检（`build.ps1` 后肉眼核对）：有 `Aprillz.MewUI.dll`、`Aprillz.MewUI.Backend.Direct2D.dll`、
+`Aprillz.MewUI.Platform.Win32.dll`；**没有** `Aprillz.MewUI.Backend.Gdi.dll` / `Aprillz.MewUI.Backend.MewVG.dll`。
 
-### 2.2 回退标准桌面栈的口子（保留能力，不做）
+### 2.2 为什么删掉 Avalonia（决策记录）
 
-将来若要回到官方 `Avalonia.Desktop`（例如要支持 macOS/Linux，或 AIO 出现阻塞问题），
-改动只允许发生在 `Xdm.App.csproj` 的包引用 + `Program.cs` 的 `BuildAvaloniaApp()`：
+2026-11-22 删除 Avalonia 前端（`Xdm.App` / `Xdm.Ui` / `Xdm.Ui.Tests`），保留 MewUI 单前端。依据是 S5
+的四档实测（3 次取中位，见 `PROGRESS.md`）：
 
-```csharp
-public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
-    .UsePlatformDetect()
-    .WithInterFont()
-    .LogToTrace();
-```
+| 档 | 产物 | 首帧 | 空闲内存 |
+|---|---|---|---|
+| MewUI AOT | **15.4 MB** 单 exe | 304 ms | **91 MB** |
+| Avalonia AOT | 30.0 MB 单 exe | 123 ms | 111 MB |
+| MewUI 托管发布 | **4.0 MB** | **939 ms** | **123 MB** |
+| Avalonia 托管发布 | 11.1 MB | 1156 ms | 163 MB |
 
-为让这次回退保持廉价，**现在就要守**：
+取舍说明（诚实版）：
 
-| # | 约束 | 原因 |
-|---|---|---|
-| 1 | 视图/业务代码不依赖 `SkiaSharp` 类型（要用也只按 Avalonia `IImage` 处理） | 门面只在 AIO 包里，回退后换成真 SkiaSharp 程序集 |
-| 2 | 只用 Fluent 主题，不引 `Avalonia.Themes.Simple` | 两边都只有 Fluent |
-| 3 | 主题只在 `App.axaml` 声明，`Xdm.Ui` 不硬编码主题类 | 回退只换包 |
-| 4 | 不用 GPU/合成器专有 API（`Composition` 特效、高端 `RenderOptions`） | AIO 主路径是软件光栅 |
-| 5 | 启动链/平台选项只写在 `Program.cs` 的 `BuildAvaloniaApp()` | 切换点必须唯一 |
-| 6 | 窗口相关不直接 P/Invoke，全部走 Avalonia 抽象 | 同上 |
+- **赢**：产物减半（AOT 30→15.4，托管 11.1→4.0）、内存更低、依赖全托管无 `runtimes/**/native`；
+  code-first 没有 XAML/后端切换的隐式约定，`Xdm.Ui.Mew` 的可测面更大（42 条结构/命令/对话框测试）。
+- **输**：AOT 档首帧更慢（123→304 ms）——MewUI 的 Direct2D 初始化 + 冷路径 JIT 都在首帧前完成；
+  托管发布档反而更快（1156→939 ms）。
+- **维护**：只剩一套视图代码，不再有「同一个界面写两遍」的长期成本；`Xdm.Ui.Shared` 未改动一行，
+  证明分层是有效的。
 
-> `Avalonia.Headless` 依赖 `Avalonia.HarfBuzz` / `Avalonia.Fonts.Inter`，与 AIO 路线冲突，
-> 所以 `Xdm.Ui.Tests` **只引 `Xdm.Ui` + Headless，不引 `Xdm.App`** —— AIO 永不进测试进程。
+若将来需要换 UI 框架，切换面依旧只有「视图工程 + 壳工程」，`Xdm.Core` / `Xdm.Ui.Shared` 不动。
 
 ### 2.3 启动与常驻开销基线（对照参考实现）
 
@@ -120,51 +108,47 @@ public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
 | `-XX:+UseZGC` + 极小堆（`-Xms6m`、`-XX:-AlwaysPreTouch`） | 低延迟 GC、常驻内存小 | .NET 默认 Server/Workstation GC 即可；不显式调 `GCSettings` |
 | `-XX:SharedArchiveFile=xdm-zgc.jsa`（AppCDS） | 跳过类加载，冷启动快 | `PublishReadyToRun=true`（发布档）；另提供 NativeAOT 发布档（`build.ps1 -Aot`） |
 | `-XX:TieredStopAtLevel=1`、`CICompilerCount=1`、`ConcGCThreads=1` | 启动期不浪费 CPU 在编译/并行 GC 上 | 保持默认分层编译；启动路径别做重活 |
-| `-Djava.library.path=$APPDIR` 预载原生库 | 避免首次调用时加载抖动 | 首帧前不加载大资源；图标走 `avares://` 编译资源 |
+| `-Djava.library.path=$APPDIR` 预载原生库 | 避免首次调用时加载抖动 | 首帧前不加载大资源；图标走嵌入资源 |
 
-**实测基线**（2026-11-22，`Release`、未开 R2R、无任务、空窗口）：
+**实测基线**（2026-11-22 S5 实测，3 次取中位，无任务、空窗口）：
 
-| 指标 | 实测 | 目标（M6 收尾） |
-|---|---|---|
-| 冷启动到窗口可见 | 759 / 807 / 1175 ms（中位 807） | ≤ 900 ms（P95，开 R2R 后） |
-| 空闲私有内存 | 100 MB | ≤ 120 MB |
-| 空闲工作集 | 139 MB（含共享页，仅供参考） | — |
+| 档 | 产物 | 首帧 | 空闲私有内存 | 目标（M6 收尾） |
+|---|---|---|---|---|
+| AOT（`-Aot`） | 15.4 MB 单 exe | 304 ms | 91 MB | 首帧 ≤ 400 ms、内存 ≤ 120 MB |
+| 托管发布（`-Publish`） | 4.0 MB 目录 | 939 ms | 123 MB | — |
 
 - 启动期**不同步**做网络或磁盘重活：任务库加载、更新检查、日志轮转放到首帧之后
-  （`OnFrameworkInitializationCompleted` 里投递，不阻塞第一帧）。
-- 发布形态：`dotnet publish -c Release -r win-x64` 用 AIO 默认的**单文件、不压缩**
-  （无原生库要解压，冷启动不吃亏），再叠加 `PublishReadyToRun=true`；
-  **禁止** `EnableCompressionInSingleFile`。
-- NativeAOT 档：`build.ps1 -Configuration Release -Aot`（= `dotnet publish -p:PublishAot=true`，
-  RID 在 `Xdm.App.csproj` 里固定为 `win-x64`）。产物是**单个原生 exe（~30 MB），目标机不需要 .NET 运行时**，
-  发布目录里不留 `.pdb`（ILC 原生符号 ~118 MB，`-KeepAotSymbols` 可保留）。
-  约束：全链路不得用反射序列化/动态代码——JSON 一律走 `XdmJsonContext`（source-generated），
-  Avalonia 视图必须声明 `x:DataType`（编译绑定）。新增落盘类型时要在 `XdmJsonContext` 补
-  `[JsonSerializable]`，否则 AOT 包运行时会抛"Metadata for type ... was not provided"。
-  代价是发布慢（几分钟）且**必须装 MSVC 链接器 + Windows SDK**（VS「使用 C++ 的桌面开发」）。
-- 内存结论：原先拍的 80 MB 不现实（Avalonia 空壳已 100 MB 私有），改为 120 MB 上限并作为回归基线。
+  （`Application.Run` 的 startup 回调里投递，不阻塞第一帧；单实例转发的链接也等首帧，见 §7.3）。
+- 发布形态：`dotnet publish -c Release -r win-x64` 叠加 `PublishReadyToRun=true`；
+  托管发布是**目录形态**（`xdm.exe` + 依赖 dll），必须现场验证「没有 `runtimes/**/native/*.dll`」。
+- NativeAOT 档：`build.ps1 -Configuration Release -Aot`（= `dotnet publish -p:PublishAot=true`）。
+  产物是**单个原生 exe（~15 MB），目标机不需要 .NET 运行时**，发布目录里不留 `.pdb`
+  （ILC 原生符号 ~118 MB，`-KeepAotSymbols` 可保留）。
+  约束：全链路不得用反射序列化/动态代码——JSON 一律走 `XdmJsonContext`（source-generated）；
+  MewUI 视图是 code-first，没有 XAML 编译绑定要担心，但**不要用 `Type.GetType(string)` 之类按名字找控件**。
+  新增落盘类型时要在 `XdmJsonContext` 补 `[JsonSerializable]`，否则 AOT 包运行时会抛
+  "Metadata for type ... was not provided"。代价是发布慢（几分钟）且**必须装 MSVC 链接器 + Windows SDK**
+  （VS「使用 C++ 的桌面开发」）。
+- 内存结论：MewUI 空壳 AOT 档 91 MB 私有，上限取 120 MB 作为回归基线。
 
-### 2.4 双前端（Avalonia / MewUI）
+### 2.4 视图层约定（MewUI）
 
-两个前端**只换启动栈**，业务与状态一律复用：`Xdm.Core`（引擎/持久化）、`Xdm.Ui.Shared`
-（ViewModel/格式化/命令）、任务库与 `settings` 表、`--db` / `--state` / `XDM_DEMO` 语义全部共用。
-差异只在视图层：
+`Xdm.Ui.Mew` 是唯一视图层，约定集中在这里，细节见 `UI-DESIGN.md §12`：
 
-| 维度 | `Xdm.Ui` + `Xdm.App`（Avalonia，默认） | `Xdm.Ui.Mew` + `Xdm.App.Mew`（MewUI） |
-|---|---|---|
-| 视图表达 | XAML + 编译绑定（`x:DataType`） | 纯 C# 构建（无 XAML、无资源字典） |
-| 渲染 | SimdAIO（Direct2D 优先，回退 CPU） | Aprillz.MewUI Direct2D 后端（唯一后端） |
-| 主题 | Fluent 资源字典 | `MewTheme` 静态类（色值/尺寸唯一来源，有 token 测试兜底） |
-| 命令 | `ICommand` | `Command` + `Window.Commands` 作用域（`MewCommandBridge` 适配） |
-| 打包 | `publish/win-x64`（11.1 MB）、`win-x64-aot`（30.0 MB） | `publish/mew-win-x64`（4.0 MB）、`mew-win-x64-aot`（15.4 MB） |
-| 测试 | `Xdm.Ui.Tests`（Avalonia.Headless 65 条） | `Xdm.Ui.Mew.Tests`（42 条：结构/命令桥/对话框/主题/布局） |
+| 维度 | 约定 |
+|---|---|
+| 视图表达 | 纯 C# 构建（无 XAML、无资源字典） |
+| 渲染 | Aprillz.MewUI Direct2D 后端（唯一后端；WARP 软件回退由后端内部处理） |
+| 主题 | `MewTheme` 静态类（色值/尺寸唯一来源，有 token 测试兜底） |
+| 命令 | `Command` + `Window.Commands` 作用域（`MewCommandBridge` 适配 `ICommand`） |
+| 打包 | `publish/win-x64`（4.0 MB 目录）、`win-x64-aot`（15.4 MB 单 exe），产物同为 `xdm.exe` |
+| 测试 | `Xdm.Ui.Mew.Tests`（42 条：结构/命令桥/对话框/主题/布局） |
 
-构建与运行：
+运行：
 
 ```powershell
-./build.ps1 -Ui mew                 # 只影响 -Publish / -Aot 的产物目录
-./build.ps1 -Ui mew -Aot            # publish/mew-win-x64-aot/xdm-mew.exe
-XDM_DEMO=3 publish/mew-win-x64-aot/xdm-mew.exe   # 演示模式，不建库
+./build.ps1 -Aot                                  # publish/win-x64-aot/xdm.exe
+XDM_DEMO=3 publish/win-x64-aot/xdm.exe            # 演示模式，不建库
 ```
 
 **MewUI 侧的三条硬约束**（都踩过，见 `PLAN-MEWUI.md`）：
@@ -418,11 +402,11 @@ PureDb 是纯托管嵌入式库（`net10.0`，无原生依赖），SQL 方言是
 - 参数边界：相对路径按**当前工作目录**转绝对路径（`dotnet run -- --db .\dev.db` 落在仓库根）；
   父目录不存在则创建；`--db` 指向已存在的**目录**或缺少取值 → 报错并以返回码 `2` 退出
   （不猜、不静默回退到默认路径，否则用户会对着错误的库排查）。
-- 解析位置：**`Xdm.App` 负责读命令行**，解析出 `AppPaths` 后注入 `TaskStore` / 引擎；
-  `Xdm.Core` 不得调用 `Environment.GetCommandLineArgs()`（测试要能直接构造 `new AppPaths(dbPath)`）。
-- 单实例：不同 `--db` 视为不同实例，允许并存；`Access=Shared` 让同一库的第二个实例仍能打开，
-  但"暂停/删除"会互相干扰 → M6 再定单实例锁，首期只在日志里警告。
-- `Xdm.Ui.Tests` / `Xdm.Core.Tests` 一律用 `:memory:` 或临时目录下的随机文件名，
+- 解析位置：**`Xdm.App.Mew` 负责读命令行**（`LaunchOptions.Parse`），解析出 `AppPaths` 后注入
+  `TaskStore` / 引擎；`Xdm.Core` 不得调用 `Environment.GetCommandLineArgs()`
+  （测试要能直接构造 `new AppPaths(dbPath)`）。
+- 单实例：不同 `--db` 视为不同实例，允许并存；同一库由命名 Mutex 挡住第二个进程（见 §7.3）。
+- `Xdm.Ui.Mew.Tests` / `Xdm.Core.Tests` 一律用 `:memory:` 或临时目录下的随机文件名，
   **禁止**写到 exe 目录（否则并发测试互相踩库，且污染构建产物）。
   `:memory:` 由 `TaskStore` 映射成 `%TEMP%\xdm-memory\` 下的临时文件，`Dispose` 时删除。
 - 发布时不要打包任何预置 `xdm.db`；首次运行自动建表（`CREATE TABLE IF NOT EXISTS`）。
@@ -544,10 +528,10 @@ if (primary is null)                       // 已有实例
 | 演示模式 | 不抢 Mutex（`XDM_DEMO` 下可同时开多个，避免验证脚本占用真实库的键） |
 | 顺序 | **先抢单实例，再打开任务库**——第二个进程不该去碰主实例正占着的库 |
 
-主窗口侧的处理时机很容易踩空：**两个前端都必须等主窗口真的显示了再弹模态框**，
-否则 `ShowDialog` 会把消息循环堵在启动回调里，主窗口永远等不到显示（只剩对话框，
-MewUI 首帧前就是这么挂的）。Avalonia 用 `DispatcherPriority.Background` 投递，
-MewUI 用 `Window.FirstFrameRendered` + `Dispatcher.BeginInvoke`；首帧之前到达的转发请求先排队。
+主窗口侧的处理时机很容易踩空：**必须等主窗口真的显示了再弹模态框**，
+否则 `ShowDialog` 会把消息循环堵在启动回调里，主窗口永远等不到显示（只剩对话框——
+MewUI 首帧前就是这么挂的）。实现用 `Window.FirstFrameRendered` + `Dispatcher.BeginInvoke`；
+首帧之前到达的转发请求先排队（`_ready` 闸门）。
 
 ## 8. UI ↔ 引擎边界
 
@@ -566,8 +550,8 @@ public interface IDownloadObserver
 public readonly record struct SegmentSnapshot(long Id, long Offset, long Length, long Synced, SegmentStatus Status);
 ```
 
-- 引擎回调发生在任意线程；`Xdm.App` 里的 `DownloadManager` 负责缓存最新值 + 250ms 合并 +
-  `Dispatcher.UIThread.Post`。
+- 引擎回调发生在任意线程；`Xdm.App.Mew` 里的 `MewDownloadBridge` 负责缓存最新值 + 250ms 合并 +
+  `Dispatcher.BeginInvoke` 切回 UI 线程（结构变化立即投递）。
 - 任务列表行只订阅 `OnProgress` / `OnTaskStatusChanged`；详情窗口打开时才订阅 `OnSegmentsChanged`，
   避免 N 段 × 1Hz 的无谓分配。
 - ViewModel 不持有 `DownloadTask`，只持有 `DownloadRecord`（不可变视图数据）。
@@ -575,7 +559,7 @@ public readonly record struct SegmentSnapshot(long Id, long Offset, long Length,
 ## 9. Ui 层结构
 
 ```
-src/Xdm.Ui.Shared/                   命名空间根 Xdm.Ui（视图无关，两个前端共用）
+src/Xdm.Ui.Shared/                   命名空间根 Xdm.Ui（视图无关）
   ViewModels/
     ViewModelBase.cs                 INotifyPropertyChanged + SetProperty
     MainWindowViewModel.cs
@@ -583,39 +567,33 @@ src/Xdm.Ui.Shared/                   命名空间根 Xdm.Ui（视图无关，两
     NewDownloadViewModel.cs
     SettingsViewModel.cs
     CategoryViewModel.cs
-    RelayCommand.cs                  10 行 ICommand 实现（换前端时不动）
+    RelayCommand.cs                  10 行 ICommand 实现（换 UI 框架时不动）
   Services/
     IDownloadActions.cs              视图动作回调（新建/暂停/删除…）
   Formatting/
     TextFormat.cs                    字节数/速度/剩余时间 → 中文文案
+  Samples/
+    SampleDownloads.cs               XDM_DEMO 用的假数据
 
-src/Xdm.Ui/                          命名空间根 Xdm.Ui（Avalonia 视图）
-  Views/
-    MainWindow.axaml                 + .axaml.cs（仅 InitializeComponent）
-    NewDownloadWindow.axaml
-    SettingsWindow.axaml
-    AboutWindow.axaml
-    ConfirmDialog.axaml
+src/Xdm.Ui.Mew/                      命名空间根 Xdm.Ui.Mew（视图，code-first）
+  MewTheme.cs                        色值/尺寸唯一来源（有 token 测试兜底）
+  MainWindow.cs                      自绘标题栏 + 工具栏 + 分类 + 列表 + 状态栏
+  MewCommandBridge.cs                ICommand → MewUI Command
+  WindowDrag.cs                      标题栏拖动 / 双击最大化
   Controls/
-    TitleBar.axaml                   + .axaml.cs 自绘标题栏（WindowDecorations=BorderOnly 配套）
-    SegmentBar.cs                    DrawingContext 直绘的分段条
-    EditTextBox.cs                   带中文右键菜单的输入框
-    DownloadRow.axaml                列表行模板
-  Converters/                        Avalonia IValueConverter 适配（状态文案走 Shared 的 TextFormat）
-  Services/                          仅 Avalonia 侧基础设施（对话框/Dispatcher 封装）
-  Assets/
-    xdm-logo.png                     AvaloniaResource：窗口图标 / 标题栏 logo
-  Styles/
-    AppStyles.axaml                  Token 与行样式
-
-src/Xdm.Ui.Mew/                      命名空间根 Xdm.Ui.Mew（MewUI 视图，code-first）
-  SpikeWindow.cs                     S1 验证窗口，S2 起由正式 MainWindow 取代
+    TitleBarChrome.cs                对话框标题栏（关闭按钮）
+    SegmentBar.cs                    分段进度条（自绘）
+    EditBox.cs                       带中文右键菜单的输入框
+    RowHost.cs                       列表行的元素宿主
+  Dialogs/
+    NewDownloadDialog.cs / SettingsDialog.cs / AboutDialog.cs / ConfirmDialog.cs
+  Assets/xdm-logo.png                标题栏 logo（嵌入资源）
 ```
 
-`Xdm.App` 只保留：`Program.cs`（启动链）、`App.axaml(.cs)`（主题挂载、主窗口创建）、
-`AppBootstrapper.cs`（DI 装配、设置加载、任务库初始化），以及 `Assets/xdm.ico`
-（`ApplicationIcon`，资源管理器/任务栏图标）。`Xdm.App.Mew` 只保留 `Program.cs`
-（`Win32Platform.Register()` + `Direct2DBackend.Register()` + `Application.Run`）。
+`Xdm.App.Mew` 只保留：`Program.cs`（`Win32Platform.Register()` + `Direct2DBackend.Register()`
++ 单实例闸门 + `Application.Run`）、`MewRuntime.cs`（组合根：路径 → 任务库 → 设置 → 引擎 → ViewModel）、
+`MewDownloadBridge.cs`（引擎事件切 UI 线程）、`MewDownloadActions.cs`（`IDownloadActions` → 引擎）、
+`Shell.cs`（打开目录等系统调用）、`Assets/xdm.ico`（`ApplicationIcon`）。
 
 窗口外观（系统 chrome 关闭、标题栏自绘、尺寸与图标规格）见 `UI-DESIGN.md` §11。
 
@@ -637,8 +615,8 @@ src/Xdm.Ui.Mew/                      命名空间根 Xdm.Ui.Mew（MewUI 视图�
 | `util/AtomicIO.kt` (132) | `Xdm.Core/Storage/AtomicJson.cs` | 用 `File.Move(overwrite)` |
 | `network/http/impl/HttpClientImpl.kt` (376) | `Xdm.Core/Http/RangeHttpClient.cs` | `SocketsHttpHandler` 重写：手动跟重定向（记 FinalUrl）、`MaxConnectionsPerServer`、逐次读超时 |
 | `downloaders/TaskInfoDB.kt` | `Xdm.Core/Tasks/TaskStore.cs` | 改 PureDb |
-| `xdm-manager/DownloadManager.kt` (2300) | `Xdm.App/DownloadManager.cs` + `Xdm.Core/Scheduling/DownloadQueue.cs` | 只取 HTTP 相关：队列、并发、发布、事件 |
-| `xdm-app/ui/**` (68 文件) | `Xdm.Ui/**` | 重新设计，见 `UI-DESIGN.md` |
+| `xdm-manager/DownloadManager.kt` (2300) | `Xdm.Core/Scheduling/DownloadManager.cs` + `DownloadQueue.cs` | 只取 HTTP 相关：队列、并发、发布、事件 |
+| `xdm-app/ui/**` (68 文件) | `Xdm.Ui.Mew/**` | 重新设计，见 `UI-DESIGN.md` |
 
 ## 11. HTTP 客户端要点
 
@@ -742,5 +720,5 @@ V3：infohash / torrent 路径），首期恒为 NULL。
 
 - V2：仍是 `Xdm.Core`，只加命名空间 `Xdm.Core.HuggingFace`；不需要新包（HTTP 已够）。
 - V3：若引 MonoTorrent，它进 `Xdm.Core`（或单独 `Xdm.Core.BitTorrent` 程序集后由 Core 引用）。
-  **不得**让它污染 `Xdm.Ui` / `Xdm.App`（保持 UI 与具体协议无关）。
-- 任何阶段都不允许在 `Xdm.Ui` 里出现协议相关 `using`（`System.Net.Http`、MonoTorrent 等）。
+  **不得**让它污染 `Xdm.Ui.Mew` / `Xdm.App.Mew`（保持 UI 与具体协议无关）。
+- 任何阶段都不允许在 `Xdm.Ui.Mew` 里出现协议相关 `using`（`System.Net.Http`、MonoTorrent 等）。

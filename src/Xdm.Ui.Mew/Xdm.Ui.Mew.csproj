@@ -16,8 +16,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- 标题栏 logo 复用 Avalonia 版资源：链接嵌入本程序集，不复制文件 -->
-    <EmbeddedResource Include="..\Xdm.Ui\Assets\xdm-logo.png" Link="Assets\xdm-logo.png" LogicalName="Xdm.Ui.Mew.Assets.xdm-logo.png" />
+    <!-- 标题栏 logo：由 tools/make-icons.ps1 从仓库根 logo.png 生成，嵌入本程序集 -->
+    <EmbeddedResource Include="Assets\xdm-logo.png" LogicalName="Xdm.Ui.Mew.Assets.xdm-logo.png" />
   </ItemGroup>
 
 </Project>

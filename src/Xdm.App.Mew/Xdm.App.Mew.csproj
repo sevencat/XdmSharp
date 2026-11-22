@@ -3,9 +3,9 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <RootNamespace>Xdm.App.Mew</RootNamespace>
-    <AssemblyName>xdm-mew</AssemblyName>
-    <!-- 资源管理器 / 任务栏图标沿用 Avalonia 壳生成的同一个 ico -->
-    <ApplicationIcon>..\Xdm.App\Assets\xdm.ico</ApplicationIcon>
+    <!-- 工程仍叫 Mew（指明启动栈），产物就是用户看到的那个 xdm.exe -->
+    <AssemblyName>xdm</AssemblyName>
+    <ApplicationIcon>Assets\xdm.ico</ApplicationIcon>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(PublishAot)' == 'true'">
