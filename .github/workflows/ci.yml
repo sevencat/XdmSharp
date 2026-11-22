@@ -1,0 +1,36 @@
+name: CI
+
+# 日常门禁：push 到 main / PR 都跑一遍「构建 + 全部测试」。
+# 只在 Windows 跑：产物是 WinExe（MewUI Win32 + Direct2D），没有跨平台目标。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一分支连推多次时只留最新一次，省 runner 时间。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 .NET SDK（版本由 global.json 约束，这里取 11.0 最新 feature band）
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '11.0.x'
+          cache: true
+          cache-dependency-path: '**/Directory.Packages.props'
+
+      - name: 构建
+        run: dotnet build XdmSharp.sln -c Release --nologo
+
+      - name: 测试
+        run: dotnet test XdmSharp.sln -c Release --no-build --nologo

@@ -1,0 +1,68 @@
+name: Release
+
+# 发版：推一个 v* 标签就会自动出 GitHub Release，产物是别人下载即用的 zip。
+#   git tag v0.1
+#   git push origin v0.1
+# 版本号取自标签（去掉前缀 v），覆盖 Directory.Build.props 里的默认 Version；v0.1 / v0.1.0 都行。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # 建 Release、传附件需要写权限
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 装 .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '11.0.x'
+          cache: true
+          cache-dependency-path: '**/Directory.Packages.props'
+
+      - name: 从标签取版本号（v0.1 → 0.1）
+        id: ver
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+(\.\d+)?$') {
+            throw "标签 $env:GITHUB_REF_NAME 不是 vX.Y / vX.Y.Z 形式"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      # 发出去的包必须是绿的：先跑全量测试（含构建）。
+      - name: 测试
+        run: dotnet test XdmSharp.sln -c Release --nologo
+
+      # framework-dependent：包只有几 MB，但目标机必须先装 .NET 11 运行时（README「运行要求」有链接）。
+      # 暂不做 self-contained / NativeAOT：AOT 挡在 JsonSerializer 反射序列化（IL2026/IL3050），
+      # self-contained 单文件 41 MB 没必要，先把普通档发出去。
+      - name: 发布 win-x64（framework-dependent）
+        shell: pwsh
+        run: |
+          $version = '${{ steps.ver.outputs.version }}'
+          dotnet publish src/Xdm.App.Mew/Xdm.App.Mew.csproj -c Release -r win-x64 `
+            -o dist/win-x64 `
+            -p:Version=$version `
+            -p:SelfContained=false `
+            --nologo
+          if ($LASTEXITCODE -ne 0) { throw "publish 失败（退出码 $LASTEXITCODE）" }
+
+          Remove-Item -Path dist/win-x64/*.pdb -Force -ErrorAction SilentlyContinue
+          Copy-Item LICENSE, README.md dist/win-x64/   # GPL-3.0 分发要带协议与说明
+          Compress-Archive -Path dist/win-x64/* -DestinationPath "dist/xdm-$version-win-x64.zip"
+
+      - name: 建 Release 并上传 zip
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem dist/*.zip | ForEach-Object { $_.FullName }
+          gh release create $env:GITHUB_REF_NAME `
+            --title "XDM Sharp ${{ steps.ver.outputs.version }}" `
+            --generate-notes `
+            @assets

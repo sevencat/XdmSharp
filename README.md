@@ -21,7 +21,22 @@ Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传）�
   点「下载此模型」才拉文件清单入队
 - **HF 搜索多关键字**：输入框里用空格或逗号分隔多个关键字（如 `qwen 7b`），只列 Hub 判定「同时包含」它们的模型
 - **默认目录**：走 `SHGetKnownFolderPath(FOLDERID_Downloads)`，用户把「下载」搬到别的盘也跟着走
-- **原生单文件**：可发布 NativeAOT 档（`build.ps1 -Aot`），15 MB 单 exe，目标机零依赖
+- **轻量发布**：framework-dependent 发布，全部文件约 5 MB（zip 约 2.5 MB），目标机只需装一次 .NET 11 运行时
+
+## 运行要求
+
+下载 [Releases](https://github.com/sevencat/XdmSharp/releases) 里的 zip 之后，先确认这台机器满足：
+
+| 要求 | 说明 |
+|---|---|
+| Windows 10 / 11（x64） | 界面走 Win32 + Direct2D 自绘，不需要 WinForms/WPF |
+| **.NET 11 运行时（x64）** | **必须自己装一次**：发布包是 framework-dependent，**不带**运行时 |
+
+- 下载地址：<https://dotnet.microsoft.com/download/dotnet/11.0>，选 **.NET Runtime 11.x** 的
+  `Windows x64`（只要 Runtime，不用 SDK，也不用 Desktop Runtime）
+- 验证装好了：`dotnet --list-runtimes` 输出里有 `Microsoft.NETCore.App 11.x.y`
+- 没装就双击 `xdm.exe`，会弹「You must install .NET」并给出下载页；装完重新双击即可
+- 解压即用，无需安装程序；数据（`xdm.db`）落在 exe 同目录，整个文件夹可搬走
 
 ## 项目背景
 
@@ -209,12 +224,32 @@ pwsh tools/make-icons.ps1                     # 改了 logo.png 后重生成 xdm
 .\build.ps1 -Configuration Release -Test -Publish   # ①构建 ②测试 ③发布 win-x64
 .\build.ps1 -Configuration Release -Aot             # NativeAOT 发布到 publish\win-x64-aot
 
-# 普通发布：publish\win-x64\xdm.exe（目录 + 托管 dll，约 4MB，framework-dependent）
-# 目标机需 .NET 11 运行时；是否改 self-contained 见 docs/PROGRESS.md 待决事项
+# 普通发布：publish\win-x64\xdm.exe（目录 + 托管 dll，约 5MB，framework-dependent）
+# 目标机需先装 .NET 11 运行时（见上面「运行要求」）；发布形态结论见 docs/PROGRESS.md 待决事项 9
 # AOT 发布：publish\win-x64-aot\xdm.exe（单个原生 exe，约 15MB，目标机不需要运行时）
 #   - 需要 MSVC 链接器 + Windows SDK（VS「使用 C++ 的桌面开发」）
 #   - 目录里只有 exe；原生符号 xdm.pdb（~118MB）默认删除，排障加 -KeepAotSymbols
+#   - 注意：当前代码还编不过 AOT（JsonSerializer 反射序列化 → IL2026/IL3050），先别用 -Aot
 ```
+
+### 发版（GitHub Releases）
+
+| 流水线 | 触发 | 干什么 |
+|---|---|---|
+| `.github/workflows/ci.yml` | push `main` / PR | `dotnet build` + 全量测试，红了就别合 |
+| `.github/workflows/release.yml` | push `v*` 标签 | 测试 → 发布 win-x64（framework-dependent）→ 打包 → 建 Release 上传 zip |
+
+```powershell
+git tag v0.1
+git push origin v0.1       # 触发 release.yml，几分钟后仓库 Releases 页就有可下载的 zip
+```
+
+产物 `xdm-<版本>-win-x64.zip`（约 2.5 MB，解压约 5 MB）：`xdm.exe` + 托管 dll + `LICENSE` + `README.md`。
+**包内不含 .NET 运行时**，使用前请按上面「[运行要求](#运行要求)」装好 .NET 11 运行时。版本号取自标签
+（`v0.1` → `0.1`，`v0.1.0` 也行），覆盖 `Directory.Build.props` 里的默认 `Version`。
+
+暂不产 self-contained / NativeAOT 档：AOT 被 Core 里的 `JsonSerializer` 反射序列化挡住
+（IL2026/IL3050，见 `docs/PROGRESS.md`），而自包含单文件要 41 MB，先发普通档。
 
 ## 文档
 

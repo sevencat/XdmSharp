@@ -28,10 +28,31 @@
 | 6 | V2 HF 是否需要 `hf_transfer` 式多连接加速 | 待 V2 实测 CDN 单连接吞吐后定 | — |
 | 7 | 父子任务的列表呈现（展开 / 独立窗口 / 折叠统计） | 默认只渲染父行（第二行显示「N/M 个文件」）；父行行首三角可原地展开子文件行（2026-11-23 落地），不做独立窗口 | 2026-11-23 |
 | 8 | 任务库位置与文件名 | **`AppContext.BaseDirectory\xdm.db`**（exe 同目录，绿色版）；不可写回退 `%LOCALAPPDATA%\Xdm\`；命令行 `--db <path>` 覆盖（优先级最高） | 2026-11-22 |
-| 9 | 发布形态：framework-dependent 目录（4MB）/ self-contained / NativeAOT（15MB） | 默认 framework-dependent（需 .NET 11）；另提供 AOT 档 `build.ps1 -Aot`（15MB 单 exe、目标机零依赖；构包需 MSVC 链接器 + Windows SDK） | 2026-11-23 |
+| 9 | 发布形态：framework-dependent 目录（约 5MB）/ self-contained（41MB）/ NativeAOT（15MB） | 走 **framework-dependent**：zip 约 2.5 MB，目标机自装 .NET 11 运行时（README「运行要求」）；self-contained 单文件 41 MB 暂不做；AOT 档等 #11 修好再上 | 2026-11-23 |
 | 10 | 同时下载/恢复的任务量大时，界面怎么刷 | **待更新项进队列 → `DispatcherTimer` 每 200ms 在 UI 线程批量 flush**；同时把行定位改字典索引、每帧汇总只算一次、结构变化合并（方案见 `ARCHITECTURE.md` §6.1）。当前是 250ms 单条 drain，够用到百级任务 | 2026-11-22（方案定，未实现） |
+| 11 | NativeAOT 档怎么恢复（当前 `PublishAot=true` 编不过） | `HfDownloadPlanner` 的 `JsonSerializer.Serialize<TValue>` 反射序列化触发 IL2026/IL3050，`TreatWarningsAsErrors` 下直接失败；要恢复得迁到 `JsonSerializerContext` 源生成。Release 流水线先只出自包含单文件 | 2026-11-23 |
 
 ## 日志
+
+### 2026-11-23 · GitHub Actions：CI + 标签发 Release
+
+- 新增 `.github/workflows/ci.yml`：push `main` / PR / 手动 → `windows-latest` 上 `dotnet build` + `dotnet test`
+  （全量）；`concurrency` 按分支取消旧任务，NuGet 全局包目录走 `setup-dotnet` 的 `cache`。
+- 新增 `.github/workflows/release.yml`：push `v*` 标签 → 测试 → `dotnet publish -c Release -r win-x64`
+  （**framework-dependent**，`SelfContained=false`）→ 删 pdb、带上 `LICENSE` / `README.md` → `Compress-Archive`
+  → `gh release create --generate-notes` 上传。版本号从标签取（`v0.1.0` → `0.1.0`）覆盖
+  `Directory.Build.props` 的默认 `Version`；不用第三方 action，release 由 runner 自带的 gh CLI 建
+  （`permissions: contents: write`）。
+- 本地实测（framework-dependent）：26 个文件 / 5.2 MB，zip 2.5 MB；`xdm.runtimeconfig.json` 只要求
+  `Microsoft.NETCore.App 11.0.0` —— 即目标机装 **.NET Runtime 11（x64）** 即可，不需要 Desktop Runtime
+  （界面 MewUI 自绘，不走 WinForms/WPF）。
+- README 新增「运行要求」小节（下载页链接、`dotnet --list-runtimes` 验证、「You must install .NET」提示），
+  发版小节写明包内**不含运行时**、需自行安装。
+- **NativeAOT 档当前编不过**（本次验证，之前没记）：`HfDownloadPlanner` 用了
+  `JsonSerializer.Serialize<TValue>(...)`（反射序列化），`PublishAot=true` 时报 IL2026 / IL3050，加上
+  `TreatWarningsAsErrors=true` 直接编译失败。所以 release **只发普通档**，不做 self-contained（41 MB 不值）
+  也不做 AOT；要恢复得先改成 `JsonSerializerContext` 源生成（见待决事项 11）。
+- 测试条数不变（只加流水线）：全量 382 通过（Core 271 + Ui.Mew 111）。
 
 ### 2026-11-23 · HF 搜索支持多关键字
 
