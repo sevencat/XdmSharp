@@ -28,7 +28,8 @@ namespace Xdm.Core.Tasks;
 /// </para>
 /// <para>
 /// 表结构**一次建全**（<c>kind</c> / <c>parent_id</c> / <c>content_sha256</c> / <c>source_meta_json</c>
-/// 以及重名策略），不做 ALTER 迁移。
+/// 以及重名策略）。PureDb 不支持 <c>ALTER TABLE</c>，所以后续新增的任务级属性（如 <c>proxy_id</c>）
+/// 走 <c>task_extras</c> 键值表，而不是给 <c>tasks</c> 加列——旧库由 <c>CREATE TABLE IF NOT EXISTS</c> 自然补齐。
 /// </para>
 /// </remarks>
 public sealed class TaskStore : IDisposable
@@ -100,6 +101,25 @@ public sealed class TaskStore : IDisposable
           value TEXT NOT NULL
         );
         """;
+
+    /// <summary>
+    /// 任务级附加属性（键值对）。单独开表而不是给 <c>tasks</c> 加列：
+    /// PureDb 不支持 <c>ALTER TABLE</c>，旧库没法补列（见 <c>docs/PROGRESS.md</c> 代理台账）。
+    /// </summary>
+    private const string CreateTaskExtrasSql = """
+        CREATE TABLE IF NOT EXISTS task_extras (
+          id      INTEGER PRIMARY KEY,
+          task_id INTEGER NOT NULL,
+          name    TEXT NOT NULL,
+          value   TEXT NOT NULL
+        );
+        """;
+
+    private const string CreateTaskExtrasIndexSql =
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_task_extras ON task_extras(task_id, name);";
+
+    /// <summary>任务级代理 id 在 <c>task_extras</c> 里的键名。</summary>
+    private const string ProxyExtraName = "proxy_id";
 
     private const string InsertSql = """
         INSERT INTO tasks (
@@ -202,6 +222,18 @@ public sealed class TaskStore : IDisposable
                 insert.ExecuteNonQuery();
             }
 
+            // id 是 MAX(id)+1 算出来的，删过最大 id 的任务后会被复用；先清掉可能残留的附加属性。
+            using (var clearExtras = Command(connection, transaction, "DELETE FROM task_extras WHERE task_id = $id;"))
+            {
+                AddParameter(clearExtras, "$id", id);
+                clearExtras.ExecuteNonQuery();
+            }
+
+            if (!string.IsNullOrWhiteSpace(task.ProxyId))
+            {
+                InsertProxyExtra(connection, transaction, id, task.ProxyId);
+            }
+
             transaction.Commit();
             return id;
         });
@@ -234,6 +266,8 @@ public sealed class TaskStore : IDisposable
             }
         }
 
+        var proxyIds = LoadProxyExtras(connection);
+
         var tasks = new List<StoredTask>();
         using (var query = Command(connection, null, $"SELECT {TaskColumns} FROM tasks ORDER BY id;"))
         using (var reader = query.ExecuteReader())
@@ -265,6 +299,7 @@ public sealed class TaskStore : IDisposable
                     NamePolicy = (NameConflictPolicy)reader.GetInt32(18),
                     CreatedAt = DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(19)),
                     FinishedAt = reader.IsDBNull(20) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(20)),
+                    ProxyId = proxyIds.TryGetValue(id, out var proxyId) ? proxyId : null,
                     Segments = segments.TryGetValue(id, out var list) ? list : [],
                 });
             }
@@ -381,7 +416,7 @@ public sealed class TaskStore : IDisposable
         });
     }
 
-    /// <summary>删除任务及其段（显式删，不依赖外键级联）。</summary>
+    /// <summary>删除任务及其段 / 附加属性（显式删，不依赖外键级联）。</summary>
     public bool Delete(long id) => Locked(connection =>
     {
         using var transaction = connection.BeginTransaction();
@@ -390,6 +425,12 @@ public sealed class TaskStore : IDisposable
         {
             AddParameter(deleteSegments, "$id", id);
             deleteSegments.ExecuteNonQuery();
+        }
+
+        using (var deleteExtras = Command(connection, transaction, "DELETE FROM task_extras WHERE task_id = $id;"))
+        {
+            AddParameter(deleteExtras, "$id", id);
+            deleteExtras.ExecuteNonQuery();
         }
 
         int affected;
@@ -482,12 +523,61 @@ public sealed class TaskStore : IDisposable
 
     private void Initialize() => Locked(connection =>
     {
-        foreach (var sql in new[] { CreateTasksSql, CreateSegmentsSql, CreateSegmentsIndexSql, CreateSettingsSql })
+        foreach (var sql in new[]
+                 {
+                     CreateTasksSql,
+                     CreateSegmentsSql,
+                     CreateSegmentsIndexSql,
+                     CreateSettingsSql,
+                     CreateTaskExtrasSql,
+                     CreateTaskExtrasIndexSql,
+                 })
         {
             using var command = Command(connection, null, sql);
             command.ExecuteNonQuery();
         }
     });
+
+    /// <summary>读全部任务的代理 id（<c>task_extras</c> 里只取这一个键）。</summary>
+    private static Dictionary<long, string> LoadProxyExtras(PureDbConnection connection)
+    {
+        var result = new Dictionary<long, string>();
+        using var query = Command(
+            connection,
+            null,
+            $"SELECT task_id, value FROM task_extras WHERE name = '{ProxyExtraName}';");
+        using var reader = query.ExecuteReader();
+        while (reader.Read())
+        {
+            result[reader.GetInt64(0)] = reader.GetString(1);
+        }
+
+        return result;
+    }
+
+    /// <summary>写一条任务级代理 id（<c>id</c> 自己算：PureDb 的 INTEGER PRIMARY KEY 不自增）。</summary>
+    private static void InsertProxyExtra(
+        PureDbConnection connection,
+        DbTransaction transaction,
+        long taskId,
+        string proxyId)
+    {
+        long id;
+        using (var query = Command(connection, transaction, "SELECT COALESCE(MAX(id), 0) FROM task_extras;"))
+        {
+            id = (long)(query.ExecuteScalar() ?? 0L) + 1;
+        }
+
+        using var insert = Command(connection, transaction, """
+            INSERT INTO task_extras (id, task_id, name, value)
+            VALUES ($id, $task, $name, $value);
+            """);
+        AddParameter(insert, "$id", id);
+        AddParameter(insert, "$task", taskId);
+        AddParameter(insert, "$name", ProxyExtraName);
+        AddParameter(insert, "$value", proxyId);
+        insert.ExecuteNonQuery();
+    }
 
     /// <summary>在全局锁内使用唯一连接；冲突重试只在另一个进程实例同时写同一库时会发生。</summary>
     private T Locked<T>(Func<PureDbConnection, T> body) => Run(() =>

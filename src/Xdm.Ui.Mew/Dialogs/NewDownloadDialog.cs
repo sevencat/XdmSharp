@@ -1,5 +1,6 @@
 using Aprillz.MewUI;
 using Aprillz.MewUI.Controls;
+using Xdm.Core.Configuration;
 using Xdm.Core.Downloads;
 using Xdm.Ui.Mew.Controls;
 using Xdm.Ui.ViewModels;
@@ -13,7 +14,7 @@ namespace Xdm.Ui.Mew.Dialogs;
 public sealed class NewDownloadDialog : Window
 {
     private const double DialogWidth = 580;
-    private const double DialogHeight = 402;
+    private const double DialogHeight = 470;
 
     private readonly NewDownloadViewModel _vm = new();
 
@@ -22,9 +23,14 @@ public sealed class NewDownloadDialog : Window
     private readonly TextBox _fileNameBox;
     private readonly NumericUpDown _segmentsBox;
     private readonly CheckBox _startNowBox;
+    private readonly WrapPanel _proxyPanel;
     private readonly TextBlock _errorText;
 
-    public NewDownloadDialog(string? initialUrl = null, string? saveFolder = null, int? segments = null)
+    public NewDownloadDialog(
+        string? initialUrl = null,
+        string? saveFolder = null,
+        int? segments = null,
+        IReadOnlyList<ProxyChoice>? proxies = null)
     {
         Borderless = true;
         Title = "新建下载";
@@ -58,6 +64,30 @@ public sealed class NewDownloadDialog : Window
         _startNowBox = new CheckBox().Content("立即开始").FontSize(12);
         _startNowBox.IsChecked = _vm.StartImmediately;
 
+        // 代理用单选组：MewUI 0.22 的 ComboBox 在弹层里点不动（PLAN-MEWUI 坑 11）。
+        // 传进来的选项由主窗口按设置生成；没有就退化成「默认 + 直连」两项。
+        _vm.ProxyChoices = proxies is { Count: > 0 } ? proxies : ProxyChoice.Build(new AppSettings());
+        _vm.SelectedProxyIndex = 0;
+        _proxyPanel = new WrapPanel().Spacing(12);
+        for (var i = 0; i < _vm.ProxyChoices.Count; i++)
+        {
+            var index = i;
+            var radio = new RadioButton()
+                .GroupName("new-download-proxy")
+                .Content(_vm.ProxyChoices[i].Label)
+                .FontSize(12)
+                .IsChecked(index == 0);
+            radio.OnCheckedChanged(checkedNow =>
+            {
+                if (checkedNow == true)
+                {
+                    _vm.SelectedProxyIndex = index;
+                }
+            });
+
+            _proxyPanel.Children(radio);
+        }
+
         _errorText = new TextBlock()
             .FontSize(12)
             .Foreground(MewTheme.Error)
@@ -66,7 +96,7 @@ public sealed class NewDownloadDialog : Window
 
         var form = new Grid()
             .Columns("90,*")
-            .Rows("Auto,12,Auto,12,Auto,12,Auto,12,Auto,12,Auto")
+            .Rows("Auto,12,Auto,12,Auto,12,Auto,12,Auto,12,Auto,12,Auto,Auto")
             .Padding(16, 14)
             .Children(
                 Label("链接").Row(0).Column(0),
@@ -89,12 +119,22 @@ public sealed class NewDownloadDialog : Window
                 Label("分段数").Row(6).Column(0),
                 _segmentsBox.Row(6).Column(1),
                 _startNowBox.Row(8).Column(1),
+                Label("代理").Row(10).Column(0),
+                // 代理可能很多：限高 + 滚动，避免把窗口撑破（这样窗口高度才能固定）。
+                // 64 ≈ 两行单选；再多就在框内滚。
+                new ScrollViewer
+                {
+                    Height = 64,
+                    VerticalScroll = ScrollMode.Auto,
+                    HorizontalScroll = ScrollMode.Disabled,
+                    Content = _proxyPanel,
+                }.Row(10).Column(1),
                 new TextBlock()
                     .Text("一期只支持 HTTP / HTTPS 直链；HuggingFace 与 BT 后续版本再加。")
                     .FontSize(11)
                     .Foreground(MewTheme.TextSecondary)
                     .TextWrapping(TextWrapping.Wrap)
-                    .Row(10)
+                    .Row(12)
                     .Column(1));
 
         var buttons = new Grid()
@@ -131,9 +171,10 @@ public sealed class NewDownloadDialog : Window
         Window owner,
         string? initialUrl = null,
         string? saveFolder = null,
-        int? segments = null)
+        int? segments = null,
+        IReadOnlyList<ProxyChoice>? proxies = null)
     {
-        var dialog = new NewDownloadDialog(initialUrl, saveFolder, segments);
+        var dialog = new NewDownloadDialog(initialUrl, saveFolder, segments, proxies);
         dialog.ShowDialog(owner);
         return dialog.Requests;
     }

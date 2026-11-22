@@ -10,6 +10,7 @@ public sealed class NewDownloadViewModel : ViewModelBase
     private string _fileName = string.Empty;
     private decimal _segments = 8;
     private bool _startImmediately = true;
+    private int _selectedProxyIndex;
     private string _errorText = string.Empty;
 
     public NewDownloadViewModel()
@@ -50,6 +51,16 @@ public sealed class NewDownloadViewModel : ViewModelBase
     {
         get => _startImmediately;
         set => SetProperty(ref _startImmediately, value);
+    }
+
+    /// <summary>可选代理（第一个是「默认」，由设置页的默认代理决定）。</summary>
+    public IReadOnlyList<ProxyChoice> ProxyChoices { get; set; } = [];
+
+    /// <summary>选中的代理选项下标；越界或未配置时按「默认」处理。</summary>
+    public int SelectedProxyIndex
+    {
+        get => _selectedProxyIndex;
+        set => SetProperty(ref _selectedProxyIndex, value);
     }
 
     public string ErrorText
@@ -103,6 +114,9 @@ public sealed class NewDownloadViewModel : ViewModelBase
         }
 
         var segments = (int)Math.Clamp(Segments, 1, 256);
+        var proxyId = SelectedProxyIndex >= 0 && SelectedProxyIndex < ProxyChoices.Count
+            ? ProxyChoices[SelectedProxyIndex].ProxyId
+            : null;
         var created = new List<DownloadRequest>(urls.Count);
 
         foreach (var text in urls)
@@ -119,6 +133,7 @@ public sealed class NewDownloadViewModel : ViewModelBase
                 TargetFolder = SaveFolder,
                 MaxSegments = segments,
                 StartImmediately = StartImmediately,
+                ProxyId = proxyId,
             });
         }
 

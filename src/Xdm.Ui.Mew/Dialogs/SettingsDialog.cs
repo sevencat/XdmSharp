@@ -13,7 +13,10 @@ namespace Xdm.Ui.Mew.Dialogs;
 public sealed class SettingsDialog : Window
 {
     private const double DialogWidth = 620;
-    private const double DialogHeight = 570;
+    private const double DialogHeight = 640;
+
+    /// <summary>默认代理单选里最多列出的代理条数（再多就让用户去新建窗口里选，避免撑破窗口）。</summary>
+    private const int MaxDefaultProxyOptions = 8;
 
     private readonly SettingsViewModel _vm;
     private readonly Func<AppSettings, string?>? _onSave;
@@ -25,11 +28,10 @@ public sealed class SettingsDialog : Window
     private readonly NumericUpDown _retriesBox;
     private readonly NumericUpDown _retryDelayBox;
     private readonly TextBox _saveFolderBox;
-    private readonly RadioButton _proxySystem;
-    private readonly RadioButton _proxyDirect;
-    private readonly RadioButton _proxyCustom;
-    private readonly StackPanel _proxyUrlRow;
-    private readonly TextBox _proxyUrlBox;
+    private readonly StackPanel _proxyRowsPanel;
+    private readonly WrapPanel _defaultProxyPanel;
+    private readonly List<ProxyRowControls> _proxyRows = [];
+    private readonly List<(int Index, RadioButton Button)> _defaultProxyRadios = [];
     private readonly MultiLineTextBox _headersBox;
     private readonly CheckBox _notifyBox;
     private readonly TextBlock _errorText;
@@ -43,8 +45,9 @@ public sealed class SettingsDialog : Window
         Title = "设置";
         ShowInTaskbar = false;
         StartupLocation = WindowStartupLocation.CenterOwner;
+        // 最小高度按「网络」页兜底（代理列表 132 + 默认代理单选 + 请求头 110），否则缩下去会被裁掉。
         WindowSize = WindowSize.Resizable(
-            DialogWidth, DialogHeight, 540, 480, DialogWidth, DialogHeight);
+            DialogWidth, DialogHeight, 540, 580, DialogWidth, DialogHeight);
 
         _segmentsBox = NumberBox(1, 256, 1, (double)_vm.MaxSegments, 150);
         _concurrentBox = NumberBox(1, 32, 1, (double)_vm.MaxConcurrent, 150);
@@ -65,15 +68,17 @@ public sealed class SettingsDialog : Window
         _saveFolderBox = EditBox.Create();
         _saveFolderBox.Text = _vm.DefaultSaveFolder;
 
-        // 代理模式用单选按钮：MewUI 0.22 的 ComboBox 在自绘弹层里不响应点击（见 PLAN-MEWUI 坑 11）。
-        _proxySystem = ProxyOption("使用系统代理", "proxy", _vm.ProxyModeIndex == 0);
-        _proxyDirect = ProxyOption("直连", "proxy", _vm.ProxyModeIndex == 1);
-        _proxyCustom = ProxyOption("自定义", "proxy", _vm.ProxyModeIndex == 2);
-        _proxyUrlBox = EditBox.Create("http://127.0.0.1:7890 或 socks5://127.0.0.1:1080");
-        _proxyUrlBox.Text = _vm.ProxyUrl;
-        _proxyUrlRow = Field("代理地址", _proxyUrlBox);
-        _proxyUrlRow.IsVisible = _vm.IsCustomProxy;
-        _proxyCustom.OnCheckedChanged(_ => _proxyUrlRow.IsVisible = _proxyCustom.IsChecked);
+        // 代理用「可增删的行 + 单选默认代理」：MewUI 0.22 的 ComboBox 在自绘弹层里不响应点击（PLAN-MEWUI 坑 11）。
+        _proxyRowsPanel = new StackPanel().Spacing(6);
+        _defaultProxyPanel = new WrapPanel().Spacing(12);
+
+        var proxyScroll = new ScrollViewer
+        {
+            Height = 132,
+            VerticalScroll = ScrollMode.Auto,
+            HorizontalScroll = ScrollMode.Disabled,
+            Content = _proxyRowsPanel,
+        };
 
         _headersBox = new MultiLineTextBox()
             .FontSize(12)
@@ -83,7 +88,20 @@ public sealed class SettingsDialog : Window
         _headersBox.Text = _vm.DefaultHeadersText;
         EditBox.AttachMenu(_headersBox);
 
-        // 内容区不滚动：四页最长的一页（连接）也放得下 620×570。
+        // 先按现有代理建行，再生成「默认代理」单选（顺序与 _vm.DefaultProxyIndex 约定一致：0 系统、1 直连、2+i 第 i 行）。
+        foreach (var row in _vm.Proxies)
+        {
+            AddProxyRow(row, rebuild: false);
+        }
+
+        if (_proxyRows.Count == 0)
+        {
+            AddProxyRow(new ProxyEditRow(), rebuild: false);
+        }
+
+        RebuildDefaultProxyOptions();
+
+        // 内容区不滚动：四页最长的一页（网络：代理列表 + 默认代理单选 + 请求头）也放得下 620×640。
         var tabs = new TabControl().TabItems(
             Tab("常规",
                 Section("界面语言", HintCombo("简体中文", "English")),
@@ -115,13 +133,19 @@ public sealed class SettingsDialog : Window
                             .Column(1))),
                 Text("任务库位置由启动参数 --db 决定，界面只读显示。")),
             Tab("网络",
-                Section("代理", new StackPanel()
-                    .Horizontal()
-                    .Spacing(18)
-                    .Children(_proxySystem, _proxyDirect, _proxyCustom)),
-                _proxyUrlRow,
+                Section("代理列表（新建任务时可选用）", new StackPanel()
+                    .Spacing(8)
+                    .Children(
+                        proxyScroll,
+                        new Button()
+                            .Content("+ 新增代理")
+                            .FontSize(12)
+                            .Height(26)
+                            .HorizontalAlignment(HorizontalAlignment.Left)
+                            .OnClick(OnAddProxy))),
+                Section("默认代理", _defaultProxyPanel),
                 Section("默认请求头（每行一条「名称: 值」）", _headersBox),
-                Text("代理与请求头变更保存后，对之后新建的任务生效；代理需重启应用。")));
+                Text("代理与请求头保存后即时生效：新任务按新代理表解析，已建任务仍走建任务时的路线。")));
 
         _errorText = new TextBlock()
             .FontSize(12)
@@ -137,7 +161,7 @@ public sealed class SettingsDialog : Window
                 new Grid()
                     .Columns("*,Auto,Auto")
                     .Children(
-                        Centered(Text("限速/并发立即生效；代理与重试参数下次启动生效。")).Column(0),
+                        Centered(Text("限速/并发/代理表立即生效；重试参数下次启动生效。")).Column(0),
                         DialogButton("保存", primary: true, OnSave).Column(1),
                         DialogButton("关闭", primary: false, Close).Column(2).Margin(8, 0, 0, 0)));
 
@@ -255,6 +279,125 @@ public sealed class SettingsDialog : Window
 
     private Border BuildTitleBar() => TitleBarChrome.Build(this, "设置", Close);
 
+    // ── 代理列表 ─────────────────────────────────────────────────────────────
+
+    private sealed class ProxyRowControls
+    {
+        public required ProxyEditRow Row { get; init; }
+
+        public required Element Container { get; init; }
+
+        public required TextBox NameBox { get; init; }
+
+        public required TextBox UrlBox { get; init; }
+    }
+
+    private void OnAddProxy() => AddProxyRow(new ProxyEditRow(), rebuild: true);
+
+    private void AddProxyRow(ProxyEditRow row, bool rebuild)
+    {
+        var nameBox = EditBox.Create("名称（可空）");
+        nameBox.Text = row.Name;
+        nameBox.Width = 150;
+
+        var urlBox = EditBox.Create("http://127.0.0.1:7890 或 socks5://127.0.0.1:1080");
+        urlBox.Text = row.Url;
+
+        var remove = new Button().Content("删除").FontSize(11).Width(52).Height(24);
+        var container = new Grid()
+            .Columns("150,*,Auto")
+            .Children(
+                nameBox.Column(0),
+                urlBox.Column(1).Margin(6, 0, 0, 0),
+                remove.Column(2).Margin(6, 0, 0, 0));
+        remove.OnClick(() => RemoveProxyRow(container));
+
+        _proxyRowsPanel.Add(container);
+        _proxyRows.Add(new ProxyRowControls
+        {
+            Row = row,
+            Container = container,
+            NameBox = nameBox,
+            UrlBox = urlBox,
+        });
+
+        if (rebuild)
+        {
+            RebuildDefaultProxyOptions();
+        }
+    }
+
+    private void RemoveProxyRow(Element container)
+    {
+        var index = _proxyRows.FindIndex(r => ReferenceEquals(r.Container, container));
+        if (index < 0)
+        {
+            return;
+        }
+
+        _proxyRows.RemoveAt(index);
+        _proxyRowsPanel.Remove(container);
+        RebuildDefaultProxyOptions();
+    }
+
+    /// <summary>
+    /// 重建「默认代理」单选组：增删代理会改变行号，单选必须跟着重建（组内固定 0 系统、1 直连）。
+    /// </summary>
+    private void RebuildDefaultProxyOptions()
+    {
+        var selected = _vm.DefaultProxyIndex;
+        _defaultProxyRadios.Clear();
+        _defaultProxyPanel.Clear();
+        _defaultProxyPanel.Children(DefaultProxyRadio(0, "系统代理"));
+        _defaultProxyPanel.Children(DefaultProxyRadio(1, "直连"));
+
+        for (var i = 0; i < _proxyRows.Count && i < MaxDefaultProxyOptions; i++)
+        {
+            var row = _proxyRows[i];
+            var label = !string.IsNullOrWhiteSpace(row.NameBox.Text)
+                ? row.NameBox.Text!
+                : !string.IsNullOrWhiteSpace(row.UrlBox.Text)
+                    ? row.UrlBox.Text!
+                    : $"代理 {i + 1}";
+            _defaultProxyPanel.Children(DefaultProxyRadio(i + 2, label));
+        }
+
+        var target = _defaultProxyRadios.FirstOrDefault(r => r.Index == selected).Button
+                     ?? _defaultProxyRadios[0].Button;
+        target.IsChecked = true;
+    }
+
+    private RadioButton DefaultProxyRadio(int index, string label)
+    {
+        var radio = new RadioButton()
+            .GroupName("default-proxy")
+            .Content(label)
+            .FontSize(12);
+        radio.OnCheckedChanged(checkedNow =>
+        {
+            if (checkedNow == true)
+            {
+                _vm.DefaultProxyIndex = index;
+            }
+        });
+
+        _defaultProxyRadios.Add((index, radio));
+        return radio;
+    }
+
+    private int SelectedDefaultProxyIndex()
+    {
+        foreach (var (index, button) in _defaultProxyRadios)
+        {
+            if (button.IsChecked == true)
+            {
+                return index;
+            }
+        }
+
+        return _vm.DefaultProxyIndex;
+    }
+
     // ── 动作 ─────────────────────────────────────────────────────────────────
 
     private void OnBrowse()
@@ -282,8 +425,20 @@ public sealed class SettingsDialog : Window
         _vm.MaxRetries = (decimal)_retriesBox.Value;
         _vm.RetryBaseDelayMs = (decimal)_retryDelayBox.Value;
         _vm.DefaultSaveFolder = _saveFolderBox.Text;
-        _vm.ProxyModeIndex = _proxyCustom.IsChecked ? 2 : _proxyDirect.IsChecked ? 1 : 0;
-        _vm.ProxyUrl = _proxyUrlBox.Text;
+
+        // 代理行控件 → VM 的编辑行（Id 沿用，保证已有任务引用的代理不被换掉）。
+        _vm.Proxies.Clear();
+        foreach (var row in _proxyRows)
+        {
+            _vm.Proxies.Add(new ProxyEditRow
+            {
+                Id = row.Row.Id,
+                Name = row.NameBox.Text ?? string.Empty,
+                Url = row.UrlBox.Text ?? string.Empty,
+            });
+        }
+
+        _vm.DefaultProxyIndex = SelectedDefaultProxyIndex();
         _vm.DefaultHeadersText = _headersBox.Text;
         _vm.NotifyOnComplete = _notifyBox.IsChecked == true;
 

@@ -56,7 +56,7 @@ public sealed class AppSettingsTests : IDisposable
     }
 
     [Fact]
-    public void Normalize_KeepsValidCustomProxy()
+    public void Normalize_MigratesLegacyCustomProxyToNamedProfile()
     {
         var settings = new AppSettings
         {
@@ -64,8 +64,56 @@ public sealed class AppSettingsTests : IDisposable
             ProxyUrl = " socks5://127.0.0.1:1080 ",
         }.Normalized();
 
-        Assert.Equal(ProxyMode.Custom, settings.ProxyMode);
-        Assert.Equal("socks5://127.0.0.1:1080", settings.ProxyUrl);
+        // 旧版单代理迁成一条具名代理，并当默认代理用；旧字段清空，避免下次再迁一遍。
+        var profile = Assert.Single(settings.Proxies);
+        Assert.Equal(AppSettings.LegacyProxyId, profile.Id);
+        Assert.Equal("socks5://127.0.0.1:1080", profile.Url);
+        Assert.Equal(AppSettings.LegacyProxyId, settings.DefaultProxyId);
+        Assert.Equal(ProxyMode.System, settings.ProxyMode);
+        Assert.Null(settings.ProxyUrl);
+    }
+
+    [Fact]
+    public void Normalize_DropsInvalidProxyProfiles()
+    {
+        var settings = new AppSettings
+        {
+            Proxies =
+            [
+                new ProxyProfile { Id = "a", Name = "公司", Url = "http://127.0.0.1:7890" },
+                new ProxyProfile { Id = "a", Name = "重复 id", Url = "http://127.0.0.1:7891" },
+                new ProxyProfile { Id = "b", Name = "坏地址", Url = "ftp://127.0.0.1:21" },
+                new ProxyProfile { Id = "", Name = "", Url = " socks5://127.0.0.1:1080 " },
+            ],
+        }.Normalized();
+
+        Assert.Equal(2, settings.Proxies.Count);
+        Assert.Equal("公司", settings.Proxies[0].Name);
+        Assert.Equal("socks5://127.0.0.1:1080", settings.Proxies[1].Url);
+
+        // 没名字的用地址兜底，id 为空时补一个。
+        Assert.Equal("socks5://127.0.0.1:1080", settings.Proxies[1].Name);
+        Assert.False(string.IsNullOrWhiteSpace(settings.Proxies[1].Id));
+    }
+
+    [Fact]
+    public void Normalize_UnknownDefaultProxyIdFallsBackToSystem()
+    {
+        var settings = new AppSettings
+        {
+            Proxies = [new ProxyProfile { Id = "a", Url = "http://127.0.0.1:7890" }],
+            DefaultProxyId = "missing",
+        }.Normalized();
+
+        Assert.Null(settings.DefaultProxyId);
+    }
+
+    [Fact]
+    public void Normalize_KeepsDirectAsDefault()
+    {
+        var settings = new AppSettings { DefaultProxyId = ProxyIds.Direct }.Normalized();
+
+        Assert.Equal(ProxyIds.Direct, settings.DefaultProxyId);
     }
 
     [Fact]
@@ -114,8 +162,12 @@ public sealed class AppSettingsTests : IDisposable
             MaxConcurrent = 5,
             MaxSegments = 12,
             SpeedLimitBytesPerSecond = 262_144,
-            ProxyMode = ProxyMode.Custom,
-            ProxyUrl = "http://127.0.0.1:7890",
+            Proxies =
+            [
+                new ProxyProfile { Id = "corp", Name = "公司", Url = "http://127.0.0.1:7890" },
+                new ProxyProfile { Id = "socks", Name = "本地", Url = "socks5://127.0.0.1:1080" },
+            ],
+            DefaultProxyId = "socks",
             DefaultHeaders = new Dictionary<string, string> { ["Referer"] = "https://example.com" },
             DefaultSaveFolder = Path.Combine(_root, "downloads"),
             NotifyOnComplete = false,
@@ -129,8 +181,10 @@ public sealed class AppSettingsTests : IDisposable
         Assert.Equal(5, loaded.MaxConcurrent);
         Assert.Equal(12, loaded.MaxSegments);
         Assert.Equal(262_144, loaded.SpeedLimitBytesPerSecond);
-        Assert.Equal(ProxyMode.Custom, loaded.ProxyMode);
-        Assert.Equal("http://127.0.0.1:7890", loaded.ProxyUrl);
+        Assert.Equal(2, loaded.Proxies.Count);
+        Assert.Equal("公司", loaded.Proxies[0].Name);
+        Assert.Equal("socks5://127.0.0.1:1080", loaded.Proxies[1].Url);
+        Assert.Equal("socks", loaded.DefaultProxyId);
         Assert.Equal("https://example.com", loaded.DefaultHeaders["Referer"]);
         Assert.Equal(settings.DefaultSaveFolder, loaded.DefaultSaveFolder);
         Assert.False(loaded.NotifyOnComplete);

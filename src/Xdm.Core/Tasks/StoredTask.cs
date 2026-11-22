@@ -39,6 +39,12 @@ public sealed record StoredTask
 
     public string? Cookie { get; init; }
 
+    /// <summary>
+    /// 任务选定的代理 id（<c>null</c> = 用建任务时的默认代理；<c>system</c>/<c>direct</c> 或具名代理 id）。
+    /// 重启恢复时按当时的代理表重新解析。
+    /// </summary>
+    public string? ProxyId { get; init; }
+
     public string? Validator { get; init; }
 
     public bool NoRangeSupport { get; init; }

@@ -32,6 +32,31 @@
 
 ## 日志
 
+### 2026-11-22 · 多代理：代理表 + 默认代理 + 任务级代理选择
+
+- **设置模型改为「代理表」**：`AppSettings.Proxies`（`ProxyProfile { Id, Name, Url }`）+ `DefaultProxyId`
+  （`null` = 系统代理，`ProxyIds.Direct` = 直连，其余为具名代理 id）。旧字段 `ProxyMode` / `ProxyUrl`
+  在 `Normalized()` 里一次性迁移成一条具名代理并清空，非法地址的行直接丢弃，未知默认 id 回落系统代理。
+- **任务级选择**：新建下载窗口多一行「代理」单选（默认 / 直连 / 各条具名代理），选中的 id 落
+  `DownloadRequest.ProxyId` → `StoredTask.ProxyId`，建任务时由 `ProxyResolver.Resolve` 解析成
+  `ProxyRoute` 固化在 `DownloadTask.Route` 上；之后改设置不影响已建任务（重启按 `proxy_id` 重新解析）。
+- **按路线分客户端**：`ProxyHttpClientProvider.For(route)` 懒建并缓存，一条路线一份连接池，
+  `DownloadEngine` 的探测与 `SegmentRunner` 都改走 `ClientFor(task)`（不再全局一个 `RangeHttpClient`）。
+- **持久化踩坑**：PureDb 不支持 `ALTER TABLE`，原打算给 `tasks` 加 `proxy_id` 列的迁移方案走不通
+  （`Unsupported statement near ALTER`），改为新增 `task_extras(task_id, name, value)` 键值表；
+  旧库靠 `CREATE TABLE IF NOT EXISTS` 自然补齐。顺带修掉 id 复用隐患：`Delete` 与 `Insert` 都清
+  `task_extras`，避免删掉最大 id 后新任务继承旧代理（`MaxId()+1` 会复用 id）。
+- **UI**：设置「网络」页 = 代理列表（名称/地址/删除 + 新增行）+ 默认代理单选组；代理选择一律
+  `RadioButton`（`ComboBox` 自绘弹层不响应点击，见 `PLAN-MEWUI.md` 坑 11）。设置页默认代理最多列
+  8 条（超出可在新建任务窗口选）。
+- **测试**：新增 `ProxyResolverTests`(8) / `ProxyHttpClientProviderTests`(3) /
+  `ProxySettingsViewModelTests`(6) / `ProxyChoiceTests`(4)，`AppSettingsTests` 换掉旧的单代理用例，
+  `TaskStoreTests` 加 `Insert_RoundTripsProxyId` / `Delete_RemovesProxyExtraSoReusedIdStaysClean` /
+  `Open_CreatesTaskExtrasOnLegacyDatabase`；`NewDownloadDialogTests` 加 5 例窗口级代理用例
+  （单选组条数、默认预选为 `null`、点具名/直连后请求带对应 id、无代理时退化成两项）。
+  全量 **236 条全绿**（Core 172 + Ui.Mew 64），构建 0 warning。
+- **后续**：HF 模型下载（输入 model id → 选文件 → 下载）、torrent（MonoTorrent）尚未开始。
+
 ### 2026-11-22 · 删除 Avalonia 前端，MewUI 成为唯一前端
 
 - **删除**：`src/Xdm.App`（7 个文件 + `Assets/xdm.ico`）、`src/Xdm.Ui`（视图/样式/转换器）、

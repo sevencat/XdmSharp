@@ -33,4 +33,10 @@ public sealed record DownloadRequest
 
     /// <summary>任务级 Cookie（随任务持久化）。</summary>
     public string? Cookie { get; init; }
+
+    /// <summary>
+    /// 代理选择：留空 = 用设置的默认代理；<c>system</c> / <c>direct</c> 或设置里某条代理的 id。
+    /// 建任务时解析成具体路线，之后改设置不影响这个任务。
+    /// </summary>
+    public string? ProxyId { get; init; }
 }

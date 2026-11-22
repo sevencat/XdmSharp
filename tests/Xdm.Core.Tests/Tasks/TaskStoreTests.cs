@@ -98,6 +98,65 @@ public sealed class TaskStoreTests : IDisposable
     }
 
     [Fact]
+    public void Insert_RoundTripsProxyId()
+    {
+        var id = _store.Insert(NewTask() with { ProxyId = "corp" });
+        var plain = _store.Insert(NewTask());
+
+        var rows = _store.LoadAll();
+        Assert.Equal("corp", rows.Single(r => r.Id == id).ProxyId);
+        Assert.Null(rows.Single(r => r.Id == plain).ProxyId);
+    }
+
+    [Fact]
+    public void Open_CreatesTaskExtrasOnLegacyDatabase()
+    {
+        // 0.1.x 的库：没有 task_extras 表，打开时 CREATE TABLE IF NOT EXISTS 建出来，代理 id 照常读写。
+        var path = Path.Combine(_root, "legacy.db");
+        using (var connection = new PureDbConnection($"Data Source={path};Access=Shared"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                CREATE TABLE tasks (
+                  id INTEGER PRIMARY KEY,
+                  kind INTEGER NOT NULL DEFAULT 0,
+                  parent_id INTEGER,
+                  url TEXT NOT NULL,
+                  file_name TEXT NOT NULL,
+                  target_folder TEXT NOT NULL,
+                  temp_folder TEXT NOT NULL,
+                  total_size INTEGER,
+                  downloaded INTEGER NOT NULL DEFAULT 0,
+                  status INTEGER NOT NULL DEFAULT 0,
+                  max_segments INTEGER NOT NULL DEFAULT 8,
+                  headers_json TEXT,
+                  cookie TEXT,
+                  validator TEXT,
+                  no_range_support INTEGER NOT NULL DEFAULT 0,
+                  content_sha256 TEXT,
+                  source_meta_json TEXT,
+                  error_code INTEGER,
+                  name_policy INTEGER NOT NULL DEFAULT 0,
+                  created_at INTEGER NOT NULL,
+                  finished_at INTEGER
+                );
+                """;
+            command.ExecuteNonQuery();
+            command.CommandText =
+                "INSERT INTO tasks (url, file_name, target_folder, temp_folder, created_at) VALUES ('https://example.com/old.bin', 'old.bin', '.', '.', 0);";
+            command.ExecuteNonQuery();
+        }
+
+        using var store = new TaskStore(path);
+        var legacy = Assert.Single(store.LoadAll());
+        Assert.Null(legacy.ProxyId);
+
+        store.Insert(NewTask() with { ProxyId = "socks" });
+        Assert.Equal("socks", store.LoadAll().Single(r => r.ProxyId is not null).ProxyId);
+    }
+
+    [Fact]
     public void InMemoryStore_KeepsSchemaAcrossConnections()
     {
         using var store = new TaskStore(":memory:");
@@ -215,6 +274,18 @@ public sealed class TaskStoreTests : IDisposable
         Assert.Empty(_store.LoadAll());
         Assert.Equal(0, _store.CountTasks());
         Assert.False(_store.Delete(id));
+    }
+
+    [Fact]
+    public void Delete_RemovesProxyExtraSoReusedIdStaysClean()
+    {
+        var id = _store.Insert(NewTask() with { ProxyId = "corp" });
+        Assert.True(_store.Delete(id));
+
+        // id 是 MAX(id)+1 算出来的，删掉最大 id 后会被下一个任务复用。
+        var reused = _store.Insert(NewTask());
+        Assert.Equal(id, reused);
+        Assert.Null(Assert.Single(_store.LoadAll()).ProxyId);
     }
 
     [Fact]

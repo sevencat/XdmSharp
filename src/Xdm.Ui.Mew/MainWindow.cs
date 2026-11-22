@@ -409,7 +409,12 @@ public sealed class MainWindow : Window
     /// <param name="initialUrl">预填的链接；空则等同普通新建。</param>
     public void BeginNewDownload(string? initialUrl = null)
     {
-        var requests = NewDownloadDialog.Show(this, initialUrl, _vm.DefaultSaveFolder, _vm.DefaultSegments);
+        var requests = NewDownloadDialog.Show(
+            this,
+            initialUrl,
+            _vm.DefaultSaveFolder,
+            _vm.DefaultSegments,
+            _vm.ProxyChoices);
         if (requests is { Count: > 0 })
         {
             _vm.StartDownloads(requests);

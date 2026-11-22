@@ -12,14 +12,16 @@ public sealed class SettingsViewModel : ViewModelBase
     /// <summary>限速输入上限（1 GB/s）。</summary>
     public const decimal MaxSpeedKbps = 1024m * 1024m;
 
+    /// <summary>默认代理下拉/单选里的固定项数：系统代理、直连。</summary>
+    public const int FixedProxyOptions = 2;
+
     private readonly AppSettings _source;
 
     private decimal _maxConcurrent;
     private decimal _maxSegments;
     private bool _speedLimitEnabled;
     private decimal _speedLimitKbps;
-    private int _proxyModeIndex;
-    private string _proxyUrl;
+    private int _defaultProxyIndex;
     private string _defaultSaveFolder;
     private bool _notifyOnComplete;
     private decimal _maxRetries;
@@ -38,13 +40,8 @@ public sealed class SettingsViewModel : ViewModelBase
         _speedLimitKbps = settings.SpeedLimitBytesPerSecond > 0
             ? Math.Max(1m, Math.Round(settings.SpeedLimitBytesPerSecond / 1024m, 1))
             : 512m;
-        _proxyModeIndex = settings.ProxyMode switch
-        {
-            ProxyMode.Direct => 1,
-            ProxyMode.Custom => 2,
-            _ => 0,
-        };
-        _proxyUrl = settings.ProxyUrl ?? string.Empty;
+        Proxies = [.. settings.Proxies.Select(static p => new ProxyEditRow { Id = p.Id, Name = p.Name, Url = p.Url })];
+        _defaultProxyIndex = DefaultProxyIndexOf(settings, Proxies);
         _defaultSaveFolder = settings.DefaultSaveFolder ?? DefaultDownloadsFolder();
         _notifyOnComplete = settings.NotifyOnComplete;
         _maxRetries = settings.MaxRetries;
@@ -58,6 +55,9 @@ public sealed class SettingsViewModel : ViewModelBase
 
     /// <summary>任务库位置（只读展示；配置也存在这个库的 settings 表里）。</summary>
     public string DbPath { get; }
+
+    /// <summary>代理列表（可直接增删行；保存时按当前内容落库）。</summary>
+    public List<ProxyEditRow> Proxies { get; }
 
     /// <summary>同时下载任务数（1–32）。</summary>
     public decimal MaxConcurrent
@@ -87,27 +87,14 @@ public sealed class SettingsViewModel : ViewModelBase
         set => SetProperty(ref _speedLimitKbps, value);
     }
 
-    /// <summary>0 系统代理 / 1 直连 / 2 自定义（与下拉框顺序一致）。</summary>
-    public int ProxyModeIndex
+    /// <summary>
+    /// 默认代理选项下标：0 = 系统代理，1 = 直连，2 + i = <see cref="Proxies"/> 第 i 条
+    /// （与设置页单选按钮顺序一致）。
+    /// </summary>
+    public int DefaultProxyIndex
     {
-        get => _proxyModeIndex;
-        set
-        {
-            if (SetProperty(ref _proxyModeIndex, value))
-            {
-                RaisePropertyChanged(nameof(IsCustomProxy));
-            }
-        }
-    }
-
-    /// <summary>是否显示代理地址输入框。</summary>
-    public bool IsCustomProxy => _proxyModeIndex == 2;
-
-    /// <summary>自定义代理地址。</summary>
-    public string ProxyUrl
-    {
-        get => _proxyUrl;
-        set => SetProperty(ref _proxyUrl, value ?? string.Empty);
+        get => _defaultProxyIndex;
+        set => SetProperty(ref _defaultProxyIndex, value);
     }
 
     /// <summary>新建任务的默认保存目录。</summary>
@@ -167,9 +154,9 @@ public sealed class SettingsViewModel : ViewModelBase
     {
         settings = _source.Clone();
 
-        if (ProxyModeIndex == 2 && !AppSettings.IsSupportedProxyUrl(ProxyUrl))
+        if (!TryBuildProxies(out var proxies, out var defaultProxyId, out var proxyError))
         {
-            ErrorText = "自定义代理地址无效（示例：http://127.0.0.1:7890）";
+            ErrorText = proxyError;
             return false;
         }
 
@@ -191,13 +178,13 @@ public sealed class SettingsViewModel : ViewModelBase
         settings.SpeedLimitBytesPerSecond = SpeedLimitEnabled
             ? (long)Math.Round(Math.Clamp(SpeedLimitKbps, 1, MaxSpeedKbps) * 1024m)
             : 0;
-        settings.ProxyMode = ProxyModeIndex switch
-        {
-            1 => ProxyMode.Direct,
-            2 => ProxyMode.Custom,
-            _ => ProxyMode.System,
-        };
-        settings.ProxyUrl = settings.ProxyMode == ProxyMode.Custom ? ProxyUrl.Trim() : null;
+        settings.Proxies = proxies;
+        settings.DefaultProxyId = defaultProxyId;
+
+        // 旧版单代理字段已经由 Proxies 取代，保存时清空避免再次迁移。
+        settings.ProxyMode = ProxyMode.System;
+        settings.ProxyUrl = null;
+
         settings.DefaultHeaders = headers;
         settings.DefaultSaveFolder = folder;
         settings.NotifyOnComplete = NotifyOnComplete;
@@ -208,6 +195,75 @@ public sealed class SettingsViewModel : ViewModelBase
         settings = settings.Normalized();
         ErrorText = string.Empty;
         return true;
+    }
+
+    /// <summary>把编辑行折成代理表 + 默认代理 id；空行忽略，地址非法直接报错。</summary>
+    private bool TryBuildProxies(
+        out List<ProxyProfile> proxies,
+        out string? defaultProxyId,
+        out string error)
+    {
+        proxies = [];
+        defaultProxyId = null;
+        error = string.Empty;
+
+        // 记录「原行号 → 落库代理」，默认代理单选按原行号选中的才有意义。
+        var kept = new List<(ProxyProfile Profile, int RowIndex)>();
+
+        for (var i = 0; i < Proxies.Count; i++)
+        {
+            var row = Proxies[i];
+            var name = (row.Name ?? string.Empty).Trim();
+            var url = (row.Url ?? string.Empty).Trim();
+
+            if (name.Length == 0 && url.Length == 0)
+            {
+                continue;
+            }
+
+            if (!AppSettings.IsSupportedProxyUrl(url))
+            {
+                error = string.IsNullOrEmpty(url)
+                    ? $"第 {i + 1} 条代理缺少地址（示例：http://127.0.0.1:7890）"
+                    : $"第 {i + 1} 条代理地址无效（示例：http://127.0.0.1:7890）";
+                return false;
+            }
+
+            var profile = new ProxyProfile
+            {
+                Id = string.IsNullOrWhiteSpace(row.Id) ? Guid.NewGuid().ToString("N") : row.Id,
+                Name = name.Length == 0 ? url : name,
+                Url = url,
+            };
+
+            kept.Add((profile, i));
+            proxies.Add(profile);
+        }
+
+        defaultProxyId = DefaultProxyIndex switch
+        {
+            <= 0 => null,
+            1 => ProxyIds.Direct,
+            _ => kept.FirstOrDefault(k => k.RowIndex == DefaultProxyIndex - FixedProxyOptions).Profile?.Id,
+        };
+
+        return true;
+    }
+
+    private static int DefaultProxyIndexOf(AppSettings settings, List<ProxyEditRow> rows)
+    {
+        if (string.Equals(settings.DefaultProxyId, ProxyIds.Direct, StringComparison.Ordinal))
+        {
+            return 1;
+        }
+
+        if (string.IsNullOrWhiteSpace(settings.DefaultProxyId))
+        {
+            return 0;
+        }
+
+        var index = rows.FindIndex(r => string.Equals(r.Id, settings.DefaultProxyId, StringComparison.Ordinal));
+        return index < 0 ? 0 : index + FixedProxyOptions;
     }
 
     private static bool TryParseHeaders(

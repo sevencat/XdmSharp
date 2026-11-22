@@ -16,6 +16,7 @@ namespace Xdm.Core.Downloads;
 public sealed class DownloadEngine : IDisposable
 {
     private readonly IRangeHttpClient _client;
+    private readonly IRangeHttpClientProvider? _provider;
     private readonly bool _ownsClient;
     private readonly string _stateDir;
     private readonly bool _writeStateFiles;
@@ -34,10 +35,12 @@ public sealed class DownloadEngine : IDisposable
         string? stateDir = null,
         IDownloadObserver? observer = null,
         DownloadEngineOptions? options = null,
-        bool writeStateFiles = true)
+        bool writeStateFiles = true,
+        IRangeHttpClientProvider? clients = null)
     {
         _client = client ?? new RangeHttpClient();
-        _ownsClient = client is null;
+        _provider = clients;
+        _ownsClient = client is null && clients is null;
         _stateDir = stateDir ?? Path.Combine(AppContext.BaseDirectory, "state");
         _observer = observer;
         _options = options ?? new DownloadEngineOptions();
@@ -326,6 +329,12 @@ public sealed class DownloadEngine : IDisposable
 
     // ---------- 探测 / 建段 ----------
 
+    /// <summary>
+    /// 任务该用哪个客户端：接了 provider 就按任务的代理路线取（同一代理共享连接池），
+    /// 否则退回构造时注入/自建的单个客户端。
+    /// </summary>
+    private IRangeHttpClient ClientFor(DownloadTask task) => _provider is null ? _client : _provider.For(task.Route);
+
     private ProbeResult Probe(DownloadTask task, CancellationToken cancellationToken)
     {
         var url = new Uri(task.Url);
@@ -336,7 +345,7 @@ public sealed class DownloadEngine : IDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            using var response = _client.Send(
+            using var response = ClientFor(task).Send(
                 new HttpRangeRequest
                 {
                     Url = url,
@@ -573,7 +582,7 @@ public sealed class DownloadEngine : IDisposable
         var task = runtime.Task;
         try
         {
-            var runner = new SegmentRunner(task, segment, _client, task.PartFile!, _options);
+            var runner = new SegmentRunner(task, segment, ClientFor(task), task.PartFile!, _options);
             var result = runner.Run(runtime.Cancellation.Token);
             if (!result.Success && result.Error != DownloadError.Cancelled)
             {

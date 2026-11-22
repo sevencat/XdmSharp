@@ -18,7 +18,7 @@ internal sealed class MewRuntime : IDisposable
     private readonly TaskStore? _store;
     private readonly DbSettingsStore? _settingsStore;
     private readonly DownloadManager? _manager;
-    private readonly RangeHttpClient? _client;
+    private readonly ProxyHttpClientProvider? _proxyClients;
     private readonly SpeedLimiter? _limiter;
 
     private MewDownloadBridge? _bridge;
@@ -33,7 +33,7 @@ internal sealed class MewRuntime : IDisposable
         TaskStore? store = null,
         DbSettingsStore? settingsStore = null,
         DownloadManager? manager = null,
-        RangeHttpClient? client = null,
+        ProxyHttpClientProvider? proxyClients = null,
         SpeedLimiter? limiter = null)
     {
         Paths = paths;
@@ -43,7 +43,7 @@ internal sealed class MewRuntime : IDisposable
         _store = store;
         _settingsStore = settingsStore;
         _manager = manager;
-        _client = client;
+        _proxyClients = proxyClients;
         _limiter = limiter;
     }
 
@@ -108,12 +108,14 @@ internal sealed class MewRuntime : IDisposable
             var settings = settingsStore.Load();
 
             var limiter = new SpeedLimiter(settings.SpeedLimitBytesPerSecond);
-            var client = new RangeHttpClient(proxyMode: settings.ProxyMode, proxyUrl: settings.ProxyUrl);
+
+            // 一条代理一份连接池：任务按自己的代理路线取客户端（见 ProxyResolver）。
+            var proxyClients = new ProxyHttpClientProvider();
             var manager = new DownloadManager(new DownloadManagerOptions
             {
                 StateDir = paths.StateDir,
                 Store = store,
-                Client = client,
+                ClientProvider = proxyClients,
                 MaxConcurrent = settings.MaxConcurrent,
                 EngineOptions = new DownloadEngineOptions
                 {
@@ -130,9 +132,10 @@ internal sealed class MewRuntime : IDisposable
             {
                 DbPath = paths.DbPath,
                 Actions = new MewDownloadActions(manager),
+                ProxyChoices = ProxyChoice.Build(settings),
             };
 
-            return new MewRuntime(
+            var runtime = new MewRuntime(
                 paths,
                 isDemo: false,
                 settings,
@@ -140,8 +143,12 @@ internal sealed class MewRuntime : IDisposable
                 store,
                 settingsStore,
                 manager,
-                client,
+                proxyClients,
                 limiter);
+
+            // 读 runtime.Settings 而不是捕获局部 settings：保存设置后新建/恢复的任务立刻按新代理表解析。
+            manager.ResolveProxy = proxyId => ProxyResolver.Resolve(runtime.Settings, proxyId);
+            return runtime;
         }
         catch
         {
@@ -178,7 +185,10 @@ internal sealed class MewRuntime : IDisposable
         return null;
     }
 
-    /// <summary>套用设置：并发/限速/默认头即时生效；代理与重试参数已固定在引擎构造时，下次启动生效。</summary>
+    /// <summary>
+    /// 套用设置：并发/限速/默认头/代理表即时生效（新任务按新代理表解析，旧任务保持原路线）；
+    /// 重试参数固定在引擎构造时，下次启动生效。
+    /// </summary>
     public void ApplySettings(AppSettings settings)
     {
         _settings = settings;
@@ -190,6 +200,7 @@ internal sealed class MewRuntime : IDisposable
             _manager.DefaultHeaders = settings.DefaultHeaders;
         }
 
+        ViewModel.ProxyChoices = ProxyChoice.Build(settings);
         ViewModel.DefaultSegments = settings.MaxSegments;
         if (settings.DefaultSaveFolder is { Length: > 0 } folder)
         {
@@ -207,7 +218,7 @@ internal sealed class MewRuntime : IDisposable
         _disposed = true;
         _bridge?.Dispose();
         _manager?.Dispose();
-        _client?.Dispose();
+        _proxyClients?.Dispose();
         _store?.Dispose();
     }
 }

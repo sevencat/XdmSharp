@@ -20,6 +20,15 @@ public sealed class DownloadManagerOptions
     /// <summary>HTTP 客户端注入（测试用）；空则引擎自建。</summary>
     public IRangeHttpClient? Client { get; init; }
 
+    /// <summary>
+    /// 按代理 id 解析路线的回调（壳里接 <c>ProxyResolver.Resolve</c>）；空则该路线恒为系统代理。
+    /// 建任务与重启恢复时各调一次——两次之间用户改了代理表就以当时为准。
+    /// </summary>
+    public Func<string?, ProxyRoute>? ResolveProxy { get; init; }
+
+    /// <summary>按代理路线分客户端的池（壳里传 <c>ProxyHttpClientProvider</c>）；空则所有任务共用一个客户端。</summary>
+    public IRangeHttpClientProvider? ClientProvider { get; init; }
+
     /// <summary>引擎调参；空则默认。</summary>
     public DownloadEngineOptions? EngineOptions { get; init; }
 
@@ -48,6 +57,7 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
     private readonly Thread _scheduler;
     private readonly DownloadEngine _engine;
     private readonly TaskStore? _store;
+    private Func<string?, ProxyRoute>? _resolveProxy;
     private readonly Timer? _persistTimer;
     private int _maxConcurrent;
     private IReadOnlyDictionary<string, string>? _defaultHeaders;
@@ -66,6 +76,7 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         options ??= new DownloadManagerOptions();
         _maxConcurrent = Math.Max(1, options.MaxConcurrent);
         _store = options.Store;
+        _resolveProxy = options.ResolveProxy;
 
         // 接了任务库就别再写 state/*.json：段表只在库里落一份，重启从库恢复，避免两处数据对不上。
         _engine = new DownloadEngine(
@@ -73,7 +84,8 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
             options.StateDir,
             this,
             options.EngineOptions,
-            writeStateFiles: _store is null);
+            writeStateFiles: _store is null,
+            clients: options.ClientProvider);
 
         if (_store is not null)
         {
@@ -98,6 +110,16 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
 
     /// <summary>最近一次落库失败的说明（<see langword="null"/> 表示一直成功）；下载本身不受影响。</summary>
     public string? PersistenceError { get; private set; }
+
+    /// <summary>
+    /// 按代理 id 解析路线的回调。壳要「保存设置后立刻生效」就改这里——
+    /// 用 <see cref="DownloadManagerOptions.ResolveProxy"/> 固定住的话，用户换默认代理得重启才生效。
+    /// </summary>
+    public Func<string?, ProxyRoute>? ResolveProxy
+    {
+        get => Volatile.Read(ref _resolveProxy);
+        set => Volatile.Write(ref _resolveProxy, value);
+    }
 
     /// <summary>同时跑几个任务（1–32）；调大后立即唤醒调度线程放行排队任务。</summary>
     public int MaxConcurrent
@@ -171,6 +193,8 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         var maxSegments = Math.Clamp(request.MaxSegments, 1, 256);
         var initialStatus = request.StartImmediately ? DownloadStatus.Queued : DownloadStatus.Paused;
         var headers = MergeHeaders(DefaultHeaders, request.Headers);
+        var proxyId = string.IsNullOrWhiteSpace(request.ProxyId) ? null : request.ProxyId.Trim();
+        var route = _resolveProxy?.Invoke(proxyId) ?? ProxyRoute.System;
 
         // 有任务库时 id 由任务库分配（重启后不会复用旧 id）；否则进程内自增。
         long id;
@@ -188,6 +212,7 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                 NamePolicy = request.NameConflict,
                 Headers = headers,
                 Cookie = request.Cookie,
+                ProxyId = proxyId,
                 CreatedAt = DateTimeOffset.UtcNow,
             });
         }
@@ -207,6 +232,8 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
             NamePolicy = request.NameConflict,
             Headers = headers,
             Cookie = request.Cookie,
+            ProxyId = proxyId,
+            Route = route,
         };
 
         var entry = new Entry(task);
@@ -738,6 +765,10 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                     NamePolicy = row.NamePolicy,
                     Headers = row.Headers,
                     Cookie = row.Cookie,
+                    ProxyId = row.ProxyId,
+
+                    // 重启后按当时的代理表重新解析：代理被删/改地址都跟着最新设置走。
+                    Route = _resolveProxy?.Invoke(row.ProxyId) ?? ProxyRoute.System,
                 };
                 task.TotalSize = row.TotalSize;
                 task.Validator = row.Validator;

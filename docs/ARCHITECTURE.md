@@ -165,12 +165,14 @@ XDM_DEMO=3 publish/win-x64-aot/xdm.exe            # 演示模式，不建库
 ```
 src/Xdm.Core/                       命名空间根 Xdm.Core
   Configuration/
-    AppSettings.cs                  用户设置（限速/代理/段数/目录/重名策略）
+    AppSettings.cs                  用户设置（限速/代理表/段数/目录/重名策略）
     DbSettingsStore.cs              设置读写（存任务库 settings 表，含旧 settings.json 迁移）
+    ProxyResolver.cs                任务级代理 id → ProxyRoute（建任务时解析并固化）
     ISettings.cs
   Http/
     IRangeHttpClient.cs             抽象，便于测试注入
     RangeHttpClient.cs              SocketsHttpHandler + HttpClient 实现
+    IRangeHttpClientProvider.cs     按 ProxyRoute 缓存客户端（一条代理一份连接池，任务间共享）
     HttpRangeRequest.cs             请求参数（url/offset/length/headers/cookie/ifRange）
     HttpResponseInfo.cs             状态码/ContentLength/ContentRange/LastModified/FinalUrl/Disposition
     ConnectOutcome.cs               **协议无关**语义：Ok / Retry / Busy / Unsupported / Expired / Rejected（见 §12.1）
@@ -454,6 +456,18 @@ CREATE TABLE IF NOT EXISTS settings (
   id    INTEGER PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- 任务级附加属性（键值对）。PureDb 不支持 ALTER TABLE，后续新增的任务字段走这里，
+-- 不给 tasks 加列；旧库由 CREATE TABLE IF NOT EXISTS 自然补齐。
+-- 当前键：proxy_id（任务创建时选定的代理，空 = 用默认代理）
+CREATE TABLE IF NOT EXISTS task_extras (
+  id      INTEGER PRIMARY KEY,
+  task_id INTEGER NOT NULL,
+  name    TEXT NOT NULL,
+  value   TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_task_extras ON task_extras(task_id, name);
 ```
 
 - **配置也在这个库里**（`settings` 表，`id=1`，`value` 是整份 `AppSettings` 的 JSON）：
@@ -627,10 +641,13 @@ new SocketsHttpHandler {
     AutomaticDecompression = DecompressionMethods.None,   // 下载文件不要透明解压
     ConnectTimeout = TimeSpan.FromSeconds(15),
     PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-    Proxy = settings.BuildProxy(),
+    Proxy = proxyFor(route),                             // 由任务的 ProxyRoute 决定，见下
 }
 ```
 
+- **代理按路线分客户端**：`ProxyHttpClientProvider.For(route)` 懒建并缓存，一条路线一份连接池
+  （系统代理 / 直连 / 每条具名代理各一份），任务之间共享；任务建好后路线不再受设置变更影响
+  （`DownloadTask.Route` 在建任务时由 `ProxyResolver` 解析固化，重启按 `task_extras.proxy_id` 重新解析）。
 - 读超时用"每次读之间"的计时器实现（对应 Kotlin `readTimeoutSeconds = 60`），
   不能只用 `HttpClient.Timeout`（那是整个请求的超时）。
 - 取消：`CancellationToken` + 主动 `response.Dispose()` 打断阻塞读（对应 Kotlin `HttpResponse.cancel`）。

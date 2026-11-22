@@ -111,6 +111,9 @@ public sealed class MainWindowViewModel : ViewModelBase
     /// <summary>新建下载窗口的默认分段数（由设置页的「连接」页签决定）。</summary>
     public int DefaultSegments { get; set; } = 8;
 
+    /// <summary>新建下载窗口可选的代理（第一项是「默认代理」，其余是设置里的具名代理）。</summary>
+    public IReadOnlyList<ProxyChoice> ProxyChoices { get; set; } = [];
+
     public bool IsEmpty => Rows.Count == 0;
 
     public ICommand PauseSelectedCommand { get; }

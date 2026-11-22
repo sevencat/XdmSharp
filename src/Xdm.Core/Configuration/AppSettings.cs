@@ -11,8 +11,8 @@ namespace Xdm.Core.Configuration;
 /// </remarks>
 public sealed class AppSettings
 {
-    /// <summary>当前设置文件结构版本。</summary>
-    public const int CurrentSchemaVersion = 1;
+    /// <summary>当前设置文件结构版本（2 起：单代理 → 具名代理列表）。</summary>
+    public const int CurrentSchemaVersion = 2;
 
     /// <summary>同时下载的任务数上限（1–32）。</summary>
     public int MaxConcurrent { get; set; } = 3;
@@ -23,10 +23,19 @@ public sealed class AppSettings
     /// <summary>全局限速（字节/秒）；0 表示不限速。</summary>
     public long SpeedLimitBytesPerSecond { get; set; }
 
-    /// <summary>代理方式。</summary>
+    /// <summary>具名代理列表：可配多条，新建任务时挑一条用。</summary>
+    public List<ProxyProfile> Proxies { get; set; } = [];
+
+    /// <summary>
+    /// 新任务的默认代理 id：<c>null</c> = 跟随系统，<see cref="ProxyIds.Direct"/> = 直连，
+    /// 其余是 <see cref="Proxies"/> 里某条的 <see cref="ProxyProfile.Id"/>。
+    /// </summary>
+    public string? DefaultProxyId { get; set; }
+
+    /// <summary>旧版单代理方式（≤1 版设置文件）；只在 <see cref="Normalized"/> 里迁进 <see cref="Proxies"/>。</summary>
     public ProxyMode ProxyMode { get; set; } = ProxyMode.System;
 
-    /// <summary>自定义代理地址（仅 <see cref="ProxyMode.Custom"/> 时有意义）。</summary>
+    /// <summary>旧版自定义代理地址（≤1 版设置文件）；同上，仅迁移用。</summary>
     public string? ProxyUrl { get; set; }
 
     /// <summary>所有任务共享的默认请求头（任务级同名头优先）。</summary>
@@ -54,6 +63,8 @@ public sealed class AppSettings
         MaxConcurrent = MaxConcurrent,
         MaxSegments = MaxSegments,
         SpeedLimitBytesPerSecond = SpeedLimitBytesPerSecond,
+        Proxies = [.. Proxies],
+        DefaultProxyId = DefaultProxyId,
         ProxyMode = ProxyMode,
         ProxyUrl = ProxyUrl,
         DefaultHeaders = new Dictionary<string, string>(DefaultHeaders, StringComparer.OrdinalIgnoreCase),
@@ -64,28 +75,30 @@ public sealed class AppSettings
     };
 
     /// <summary>
-    /// 夹紧到合法范围并清洗请求头：手改 JSON、旧版本文件、UI 误输入都走这里，
+    /// 夹紧到合法范围并清洗请求头/代理表：手改 JSON、旧版本文件、UI 误输入都走这里，
     /// 保证后续代码拿到的值可用（不抛异常、不把 CR/LF 塞进请求头）。
     /// </summary>
     public AppSettings Normalized()
     {
-        var mode = Enum.IsDefined(ProxyMode) ? ProxyMode : Http.ProxyMode.System;
-        var proxyUrl = string.IsNullOrWhiteSpace(ProxyUrl) ? null : ProxyUrl.Trim();
-        if (mode == Http.ProxyMode.Custom && !IsSupportedProxyUrl(proxyUrl))
-        {
-            // 地址不合法就退回系统代理，别把请求全指向一个坏代理。
-            mode = Http.ProxyMode.System;
-            proxyUrl = null;
-        }
+        var proxies = SanitizeProxies(Proxies, ProxyMode, ProxyUrl);
+
+        // 旧版「全局自定义代理」迁进来后必须当默认用，否则升级后悄悄变回系统代理。
+        var defaultProxyId = NormalizeProxyId(DefaultProxyId, proxies)
+            ?? (proxies.Any(p => string.Equals(p.Id, LegacyProxyId, StringComparison.Ordinal)) ? LegacyProxyId : null);
 
         return new AppSettings
         {
-            SchemaVersion = Math.Max(1, SchemaVersion),
+            SchemaVersion = Math.Max(CurrentSchemaVersion, SchemaVersion),
             MaxConcurrent = Math.Clamp(MaxConcurrent, 1, 32),
             MaxSegments = Math.Clamp(MaxSegments, 1, 256),
             SpeedLimitBytesPerSecond = Math.Clamp(SpeedLimitBytesPerSecond, 0, 1024L * 1024 * 1024),
-            ProxyMode = mode,
-            ProxyUrl = proxyUrl,
+            Proxies = proxies,
+            DefaultProxyId = defaultProxyId,
+
+            // 旧字段已经迁进 Proxies，保存时留空，别让下次启动再迁一遍。
+            ProxyMode = ProxyMode.System,
+            ProxyUrl = null,
+
             DefaultHeaders = SanitizeHeaders(DefaultHeaders),
             DefaultSaveFolder = string.IsNullOrWhiteSpace(DefaultSaveFolder) ? null : DefaultSaveFolder.Trim(),
             NotifyOnComplete = NotifyOnComplete,
@@ -104,6 +117,61 @@ public sealed class AppSettings
 
         return Uri.TryCreate(proxyUrl.Trim(), UriKind.Absolute, out var uri)
                && uri.Scheme is "http" or "https" or "socks4" or "socks4a" or "socks5";
+    }
+
+    /// <summary>
+    /// 清洗代理表：丢掉地址非法的条目、补 id/名字、按 id 去重（最多 32 条）。
+    /// 旧版单代理配置在这里迁进来（<c>legacy</c> 这条 id 固定，重复调用不会翻倍）。
+    /// </summary>
+    private static List<ProxyProfile> SanitizeProxies(List<ProxyProfile>? proxies, ProxyMode legacyMode, string? legacyUrl)
+    {
+        var result = new List<ProxyProfile>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        if (proxies is not null)
+        {
+            foreach (var profile in proxies)
+            {
+                if (result.Count >= 32 || profile is null || !IsSupportedProxyUrl(profile.Url))
+                {
+                    continue;
+                }
+
+                var url = profile.Url.Trim();
+                var id = string.IsNullOrWhiteSpace(profile.Id) ? Guid.NewGuid().ToString("N") : profile.Id.Trim();
+                if (!seen.Add(id))
+                {
+                    continue;
+                }
+
+                var name = string.IsNullOrWhiteSpace(profile.Name) ? url : profile.Name.Trim();
+                result.Add(new ProxyProfile { Id = id, Name = name, Url = url });
+            }
+        }
+
+        if (result.Count == 0 && legacyMode == ProxyMode.Custom && IsSupportedProxyUrl(legacyUrl))
+        {
+            result.Add(new ProxyProfile { Id = LegacyProxyId, Name = "默认代理", Url = legacyUrl!.Trim() });
+        }
+
+        return result;
+    }
+
+    /// <summary>默认代理 id 清洗：指向不存在/非法的代理时退回系统代理。</summary>
+    private static string? NormalizeProxyId(string? proxyId, List<ProxyProfile> proxies)
+    {
+        if (string.IsNullOrWhiteSpace(proxyId))
+        {
+            return null;
+        }
+
+        var id = proxyId.Trim();
+        if (id is ProxyIds.System or ProxyIds.Direct)
+        {
+            return id == ProxyIds.System ? null : ProxyIds.Direct;
+        }
+
+        return proxies.Any(p => string.Equals(p.Id, id, StringComparison.Ordinal)) ? id : null;
     }
 
     private static Dictionary<string, string> SanitizeHeaders(Dictionary<string, string>? headers)
@@ -147,4 +215,7 @@ public sealed class AppSettings
 
         return true;
     }
+
+    /// <summary>旧版自定义代理迁移后固定用的 id。</summary>
+    public const string LegacyProxyId = "legacy";
 }

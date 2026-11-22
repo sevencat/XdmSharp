@@ -1,4 +1,7 @@
+using Aprillz.MewUI.Controls;
+using Xdm.Core.Configuration;
 using Xdm.Ui.Mew.Dialogs;
+using Xdm.Ui.ViewModels;
 
 namespace Xdm.Ui.Mew.Tests;
 
@@ -83,5 +86,81 @@ public class NewDownloadDialogTests
 
         Assert.False(dialog.Submit());
         Assert.Contains("保存目录不存在", dialog.ViewModel.ErrorText, StringComparison.Ordinal);
+    }
+
+    // ── 任务级代理：设置里的代理表要落到单选组，选中的那条要进请求 ──────────────────
+
+    [Fact]
+    public void Renders_One_Radio_Per_Proxy_Choice()
+    {
+        var dialog = NewWithProxies();
+
+        var radios = VisualTree.Descendants(dialog.Content).OfType<RadioButton>().ToList();
+
+        // 「默认（公司代理）」+「直连」+ 具名代理 一条，共 3 个。
+        Assert.Equal(3, radios.Count);
+        Assert.True(VisualTree.ContainsText(dialog.Content, "默认（公司代理）"));
+        Assert.True(VisualTree.ContainsText(dialog.Content, "直连"));
+    }
+
+    [Fact]
+    public void Default_Choice_Is_Preselected_And_Submits_Null_Proxy()
+    {
+        var dialog = NewWithProxies();
+
+        Assert.True(dialog.Submit());
+
+        // null = 跟随设置里的默认代理；在这里就是「公司代理」，但请求上不写死。
+        Assert.Null(Assert.Single(dialog.Requests!).ProxyId);
+    }
+
+    [Fact]
+    public void Selecting_Proxy_Radio_Puts_Its_Id_On_Request()
+    {
+        var dialog = NewWithProxies();
+        var radios = VisualTree.Descendants(dialog.Content).OfType<RadioButton>().ToList();
+
+        radios[2].IsChecked = true;   // 第 3 项 = 具名代理「公司代理」
+
+        Assert.Equal(2, dialog.ViewModel.SelectedProxyIndex);
+        Assert.True(dialog.Submit());
+        Assert.Equal("corp", Assert.Single(dialog.Requests!).ProxyId);
+    }
+
+    [Fact]
+    public void Selecting_Direct_Radio_Puts_Direct_Id_On_Request()
+    {
+        var dialog = NewWithProxies();
+
+        VisualTree.Descendants(dialog.Content).OfType<RadioButton>().ElementAt(1).IsChecked = true;
+
+        Assert.True(dialog.Submit());
+        Assert.Equal(ProxyIds.Direct, Assert.Single(dialog.Requests!).ProxyId);
+    }
+
+    [Fact]
+    public void Falls_Back_To_Default_When_No_Proxies_Configured()
+    {
+        // 设置里一条具名代理都没有时只有「默认 / 直连」两项，不能出现空的单选组。
+        var dialog = new NewDownloadDialog("https://example.com/a.bin", Path.GetTempPath());
+
+        Assert.Equal(2, VisualTree.Descendants(dialog.Content).OfType<RadioButton>().Count());
+        Assert.True(dialog.Submit());
+        Assert.Null(Assert.Single(dialog.Requests!).ProxyId);
+    }
+
+    private static NewDownloadDialog NewWithProxies()
+    {
+        var settings = new AppSettings
+        {
+            Proxies = [new ProxyProfile { Id = "corp", Name = "公司代理", Url = "http://127.0.0.1:7890" }],
+            DefaultProxyId = "corp",
+        };
+
+        return new NewDownloadDialog(
+            "https://example.com/a.bin",
+            Path.GetTempPath(),
+            null,
+            ProxyChoice.Build(settings));
     }
 }

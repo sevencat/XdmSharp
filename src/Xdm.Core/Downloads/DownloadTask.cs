@@ -144,6 +144,17 @@ public sealed class DownloadTask
     /// <summary>任务级 Cookie。</summary>
     public string? Cookie { get; init; }
 
+    /// <summary>
+    /// 任务选定的代理 id（<see langword="null"/> = 用建任务时的默认代理，
+    /// <c>system</c>/<c>direct</c> 或具名代理 id）。只用于展示与重启后恢复，不发请求。
+    /// </summary>
+    public string? ProxyId { get; init; }
+
+    /// <summary>
+    /// 创建任务时解析好的代理路线；引擎按它取客户端。代理被删/改都不影响已建任务。
+    /// </summary>
+    public Http.ProxyRoute Route { get; init; } = Http.ProxyRoute.System;
+
     /// <summary>未完成文件（<c>.&lt;id&gt;.xdm-part</c>，点前缀避免被误认为完整文件）。</summary>
     public string PartPath => Path.Combine(TargetFolder, $".{Id}.xdm-part");
 
