@@ -1,11 +1,12 @@
 using Xdm.Core.Downloads;
 
-namespace Xdm.App;
+namespace Xdm.Ui.Samples;
 
 /// <summary>
 /// M1 用的假数据（M4 换成 TaskStore + 引擎）。固定种子，保证每次启动列表一致、好对比截图。
+/// 两个前端（Avalonia / MewUI）共用同一份，便于逐像素对照。
 /// </summary>
-internal static class SampleDownloads
+public static class SampleDownloads
 {
     private static readonly string[] Catalog =
     [

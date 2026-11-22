@@ -15,6 +15,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- ViewModel / Service / 格式化在 Xdm.Ui.Shared（视图无关），本工程只放 Avalonia 视图 -->
+    <ProjectReference Include="..\Xdm.Ui.Shared\Xdm.Ui.Shared.csproj" />
     <ProjectReference Include="..\Xdm.Core\Xdm.Core.csproj" />
   </ItemGroup>
 

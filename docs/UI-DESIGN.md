@@ -267,3 +267,21 @@
 - exe / 任务栏图标：`src/Xdm.App/Assets/xdm.ico`（`ApplicationIcon`），同一透明底打包
   16/20/24/32/40/48/64/96/128/256 十个 PNG 压缩帧（手工拼 ICONDIR，256 帧在目录项里记 0）。
 - 不要再用「白底圆角牌」：标题栏是深色，白块会显得像贴纸。
+
+## 12. MewUI 前端的一致性约定
+
+MewUI 版（`Xdm.Ui.Mew`）是同一套规范的 code-first 实现，**视觉对齐按截图验收**，不按 XAML 对齐。
+与 Avalonia 版的差异只允许出现在实现手段上：
+
+| 规范项 | Avalonia 实现 | MewUI 实现 |
+|---|---|---|
+| 颜色 / 尺寸 token | `Styles/Theme.axaml` 资源字典 | `MewTheme` 静态类（`MewThemeTests` 钉住色值与尺寸） |
+| 标题栏 | `Controls/TitleBar.axaml` | `MainWindow.BuildTitleBar()`（`Border` + `PathShape` 矢量窗钮） |
+| 对话框标题栏 | 各自 XAML | `Controls/TitleBarChrome.Build()`（四框共用） |
+| 暗色标题栏上的按钮 | `Button.cap` 样式 | **不能用 `Button`**：模板背景压不住，会在深色底上露出浅色方块，必须 `Border` 自绘 hover |
+| 右键菜单 | Fluent 默认（已是中文） | MewUI 自带英文 `Cut/Copy/Paste`，用 `Controls/EditBox.AttachMenu()` 换成中文并设 `CommandTarget` |
+| 状态文案 | `DownloadStatusTextConverter` | 同一个转换器（`Xdm.Ui.Shared`），MewUI 侧只换成 `BadgeStyle` 取色 |
+| 行内图标 | `PathIcon` + 资源 | `PathShape` + `Geometry.Parse`，**必须显式设 `StrokeThickness=1`**，否则笔画不显示 |
+
+字号与间距仍按 §10；MewUI 的字体族走系统默认（不引入外部字体），实测中英文渲染与 Avalonia 版一致。
+行高、标题栏高、状态栏高、左栏宽与 §10 表完全一致（`MewTheme` 里同名常量）。

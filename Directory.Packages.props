@@ -15,6 +15,15 @@
     <PackageVersion Include="Sevencat.Avalonia.SimdAIO" Version="12.1.6.2" />
   </ItemGroup>
 
+  <ItemGroup Label="MewUI">
+    <!-- 0.x：次版本之间可能有破坏性变更，锁死版本，升级当独立任务做（docs/PLAN-MEWUI.md §6） -->
+    <!-- 不引 Aprillz.MewUI.Windows meta 包：它把 Gdi / MewVG 一并拖进产物，
+         这里只引 Direct2D 后端，靠传递依赖带出 Platform.Win32 与 Core -->
+    <PackageVersion Include="Aprillz.MewUI.Core" Version="0.22.1" />
+    <PackageVersion Include="Aprillz.MewUI.Platform.Win32" Version="0.22.1" />
+    <PackageVersion Include="Aprillz.MewUI.Backend.Direct2D" Version="0.22.1" />
+  </ItemGroup>
+
   <ItemGroup Label="Data">
     <PackageVersion Include="PureDb" Version="1.0.0-rc.1" />
   </ItemGroup>

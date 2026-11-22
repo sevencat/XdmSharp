@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>Xdm.App.Mew</RootNamespace>
+    <AssemblyName>xdm-mew</AssemblyName>
+    <!-- 资源管理器 / 任务栏图标沿用 Avalonia 壳生成的同一个 ico -->
+    <ApplicationIcon>..\Xdm.App\Assets\xdm.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(PublishAot)' == 'true'">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <StripSymbols>true</StripSymbols>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 只引 Direct2D 后端（传递 Platform.Win32 + Core），不引 Windows meta 包，砍掉 Gdi / MewVG 约 550 KB -->
+    <PackageReference Include="Aprillz.MewUI.Backend.Direct2D" />
+    <PackageReference Include="Aprillz.MewUI.Platform.Win32" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Xdm.Ui.Mew\Xdm.Ui.Mew.csproj" />
+    <ProjectReference Include="..\Xdm.Ui.Shared\Xdm.Ui.Shared.csproj" />
+    <ProjectReference Include="..\Xdm.Core\Xdm.Core.csproj" />
+  </ItemGroup>
+
+</Project>

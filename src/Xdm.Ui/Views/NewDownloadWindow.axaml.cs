@@ -34,6 +34,12 @@ public partial class NewDownloadWindow : Window
         set => _viewModel.Segments = Math.Clamp(value, 1, 256);
     }
 
+    /// <summary>命令行 / 第二个实例带进来的链接，弹窗前预填（多行时会一次建多条任务）。</summary>
+    public string InitialUrl
+    {
+        set => _viewModel.Urls = value;
+    }
+
     /// <summary>确认添加时生成的下载请求（<see cref="ShowDialog{TResult}"/> 返回 true 时有效）。</summary>
     public IReadOnlyList<DownloadRequest> CreatedRequests { get; private set; } = [];
 

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Xdm.Ui.Mew</RootNamespace>
+    <!-- 视图层：只引 MewUI 控件层与共享层，不引启动栈（平台/后端注册在 Xdm.App.Mew） -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 视图层只需要控件层（Core）；平台与后端程序集由壳工程引用，避免视图工程拖入渲染栈 -->
+    <PackageReference Include="Aprillz.MewUI.Core" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Xdm.Ui.Shared\Xdm.Ui.Shared.csproj" />
+    <ProjectReference Include="..\Xdm.Core\Xdm.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 标题栏 logo 复用 Avalonia 版资源：链接嵌入本程序集，不复制文件 -->
+    <EmbeddedResource Include="..\Xdm.Ui\Assets\xdm-logo.png" Link="Assets\xdm-logo.png" LogicalName="Xdm.Ui.Mew.Assets.xdm-logo.png" />
+  </ItemGroup>
+
+</Project>

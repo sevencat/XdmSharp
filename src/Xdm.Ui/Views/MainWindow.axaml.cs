@@ -81,19 +81,28 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void OnNewDownloadClick(object? sender, RoutedEventArgs e)
+    /// <summary>
+    /// 弹「新建下载」并预填链接。工具栏「新建」、命令行 URL、第二个实例转发都走这一条路径。
+    /// </summary>
+    /// <param name="initialUrl">预填的链接；空则等同普通新建。</param>
+    public async Task BeginNewDownloadAsync(string? initialUrl = null)
     {
         var dialog = new NewDownloadWindow
         {
             SaveFolder = _viewModel.DefaultSaveFolder,
             Segments = _viewModel.DefaultSegments,
+            InitialUrl = initialUrl ?? string.Empty,
         };
+
         var confirmed = await dialog.ShowDialog<bool>(this);
         if (confirmed)
         {
             _viewModel.StartDownloads(dialog.CreatedRequests);
         }
     }
+
+    private async void OnNewDownloadClick(object? sender, RoutedEventArgs e)
+        => await BeginNewDownloadAsync();
 
     private void OnSettingsClick(object? sender, RoutedEventArgs e)
         => SettingsRequested?.Invoke(this, EventArgs.Empty);

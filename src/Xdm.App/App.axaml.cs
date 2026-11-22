@@ -2,10 +2,12 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
+using Avalonia.Threading;
 using Xdm.Core.Configuration;
 using Xdm.Core.Downloads;
 using Xdm.Core.Http;
 using Xdm.Core.Scheduling;
+using Xdm.Ui.Samples;
 using Xdm.Ui.ViewModels;
 using Xdm.Ui.Views;
 
@@ -35,6 +37,16 @@ public partial class App : Application
             window.SettingsRequested += (_, _) => ShowSettings(window);
             desktop.MainWindow = window;
             desktop.Exit += OnExit;
+
+            // 第二个实例转发来的链接（或本进程命令行带的那个）：切回 UI 线程、把窗口提到前台再弹对话框。
+            Startup.SetActivationHandler(url => Dispatcher.UIThread.Post(() => Activate(window, url)));
+
+            if (!string.IsNullOrWhiteSpace(Startup.InitialUrl))
+            {
+                var initialUrl = Startup.InitialUrl;
+                // 等首帧和布局稳定后再弹模态框，否则对话框会按未布局的 owner 居中。
+                Dispatcher.UIThread.Post(() => Activate(window, initialUrl), DispatcherPriority.Background);
+            }
         }
 
         base.OnFrameworkInitializationCompleted();
@@ -91,6 +103,30 @@ public partial class App : Application
         _bridge = new DownloadUiBridge(_manager, viewModel);
         _mainViewModel = viewModel;
         return viewModel;
+    }
+
+    /// <summary>把主窗口带到前台；带链接时顺便弹「新建下载」。</summary>
+    private static void Activate(MainWindow window, string? url)
+    {
+        if (window.WindowState == WindowState.Minimized)
+        {
+            window.WindowState = WindowState.Normal;
+        }
+
+        if (!window.IsVisible)
+        {
+            window.Show();
+        }
+
+        // 从别的进程请求激活时 Windows 不保证给前台权限；短暂置顶一次可以可靠地把窗口翻上来。
+        window.Topmost = true;
+        window.Topmost = false;
+        window.Activate();
+
+        if (!string.IsNullOrWhiteSpace(url))
+        {
+            _ = window.BeginNewDownloadAsync(url);
+        }
     }
 
     private void ShowSettings(Window owner)

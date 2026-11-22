@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Xdm.Ui.Mew.Tests</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <!-- 只测 MewUI 视图层：引用 Xdm.Ui.Mew，不拖入 App 启动栈。
+         MewUI 0.22 没有 Avalonia 那样的 Headless 宿主，这里断言「不 Show 的控件树」与桥接逻辑；
+         需要真窗口/消息循环的部分留给 mew-s5 那类端到端脚本。 -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aprillz.MewUI.Platform.Win32" />
+    <PackageReference Include="Aprillz.MewUI.Backend.Direct2D" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Xdm.Ui.Mew\Xdm.Ui.Mew.csproj" />
+  </ItemGroup>
+
+</Project>

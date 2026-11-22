@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Xdm.Ui</RootNamespace>
+    <!--
+      视图无关层：ViewModel / Service / 格式化，只依赖 Xdm.Core，不引任何 UI 框架。
+      两个前端（Xdm.Ui = Avalonia，Xdm.Ui.Mew = MewUI）共用本工程；
+      换前端时本工程零改动（ARCHITECTURE.md §2.2）。
+    -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Xdm.Core\Xdm.Core.csproj" />
+  </ItemGroup>
+
+</Project>

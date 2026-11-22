@@ -32,6 +32,175 @@
 
 ## 日志
 
+### 2026-11-22 · M6 单实例 + 命令行传 URL（两个前端同时接）
+
+- **Core 新增两件不依赖 UI 的能力**：
+  - `Xdm.Core/Configuration/LaunchOptions.cs`：`Parse(args)` = `AppPaths.Resolve` + 捞第一个 HTTP/HTTPS 链接
+    （跳过 `--db` 的值，`--db=x` 不吃下一个参数）；`IsHttpUrl` 只认 http/https。
+  - `Xdm.Core/Shell/SingleInstanceHost.cs`：命名 Mutex 定主从（`Local\xdm-sharp-<key>`，键 = 库全路径小写
+    SHA256 前 8 字节）+ 命名管道转发载荷（链接或空串=只激活）。`TryAcquire` 不取 Mutex 所有权，
+    只用 `createdNew` 判定，避开「Mutex 归创建线程所有、换线程 Dispose 抛异常」；`Dispose` 先取消、
+    再自连一下叫醒阻塞在 `WaitForConnection` 的监听线程，最后 Join 2s 兜底。
+- **两个前端都接上**：`Program` 里**先抢单实例、再开任务库**（第二个进程不该碰主实例占着的库），
+  抢不到就把 URL 递过去并退出（`0` 已交接 / `4` 交接失败）；主窗口侧 `BeginNewDownload*` 预填链接，
+  与工具栏「新建」共用一条路径（Avalonia `BeginNewDownloadAsync`、MewUI `BeginNewDownload`）。
+  Avalonia 用 `DispatcherPriority.Background` 延后弹框，MewUI 用 `Window.FirstFrameRendered`。
+- **踩坑（已写进 `ARCHITECTURE.md §7.3`）**：冷启动带 URL 时，在 `Application.Run` 的 startup 回调里
+  直接 `ShowDialog` 会把消息循环堵住——实测只剩「新建下载」一个窗口，主窗口永远不显示。
+  MewUI 改成首帧后再弹；首帧之前到达的转发请求排队（`_ready` 闸门）。
+- **验证**（Debug 产物，两个前端各跑一遍）：
+  | 场景 | Avalonia | MewUI |
+  |---|---|---|
+  | 冷启动带链接 | 主窗口 + 预填 `https://example.com/cold.bin` 的对话框 | 同左 |
+  | 运行中再启动带链接 | 第二进程 `delivered=True`、退出码 0；主窗口弹预填对话框 | 同左 |
+  | 运行中再启动不带链接 | 第二进程退出码 0，只激活窗口 | 同左 |
+  | 演示模式双开 | 两个进程都能起（不抢 Mutex） | 同左 |
+- **测试**：`LaunchOptionsTests`（9）+ `SingleInstanceHostTests`（7，含管道往返、重复抢锁、不同库键互不影响）
+  → 全量 **262 条全绿**（Core 155 + Ui 65 + Ui.Mew 42），构建 0 warning。
+
+### 2026-11-22 · MewUI S5 完成：测试工程 + AOT 出包 + 双前端文档
+
+- **新测试工程 `tests/Xdm.Ui.Mew.Tests`（42 条，全绿）**。MewUI 0.22 没有 Headless 宿主，
+  但控件在 `Show()` 之前就是普通对象：结构类断言照样能走逻辑树，只有 `Measure/Arrange`
+  需要按需注册 Win32 + Direct2D（失败则 `Assert.Skip`）。覆盖：主窗口结构与命令作用域、
+  命令桥注册/注销/转发、四个对话框标题栏与文案、新建下载的预设与校验、输入框中文右键菜单、
+  主题 token、300 行时的元素树规模（MewUI 用绘制代替行容器，等价于虚拟化断言）。
+  坑写进 `PLAN-MEWUI.md` 23–26（控件非线程安全 → 测试串行；无 Headless；`AccessText` 只能反射读；
+  `ListBox` 不建行元素）。为测试加了最小测试缝：`InternalsVisibleTo`、`MainWindow.ViewModelForTest`、
+  `NewDownloadDialog.Submit()/ViewModel`、`MewCommandBridge.CanExecute()/Execute()`。
+- **`build.ps1` 加 `-Ui`**（`avalonia` 默认 / `mew`）：只切发布工程与产物目录，
+  构建与测试始终覆盖两个前端。顺手删掉 S1 遗留且不再被引用的 `Xdm.Ui.Mew/SpikeWindow.cs`。
+- **出包与实测**（3 次取中位，空库、空闲 2s 后取样）：
+
+  | 档位 | 产物体积 | 首帧（主窗口可见） | 工作集 |
+  |---|---|---|---|
+  | MewUI NativeAOT | **15.4 MB**（单 exe） | 304 ms | **91 MB** |
+  | Avalonia NativeAOT | 30.0 MB（单 exe） | **123 ms** | 111 MB |
+  | MewUI framework-dependent | 4.0 MB（目录） | 939 ms | 123 MB |
+  | Avalonia framework-dependent | 11.1 MB（目录） | 1156 ms | 163 MB |
+
+  结论：MewUI 档**体积减半、内存低约 18%**，AOT 首帧比 Avalonia 慢（304 vs 123 ms，
+  差距在 Direct2D 设备/字体初始化），但比两个 framework-dependent 档都快。
+  AOT 产物实机跑通：真实库建库 + 空态、演示模式 3 行（logo/图标/中文/速度剩余全部正常），
+  一次反射相关的裁剪问题都没出现（MewUI 0.22.1 自身是 AOT 干净的）。
+- **回归**：`dotnet build XdmSharp.sln` 0 error / 0 warning；`dotnet test` **241 条全绿**
+  （Core 134 + Avalonia Ui 65 + MewUI 42）。`./build.ps1 -Ui mew -Aot` /
+  `-Ui avalonia -Aot` 均一次成功。
+- **文档**：`ARCHITECTURE.md` 新增 §2.4「双前端」与工程表补 `Xdm.Ui.Mew.Tests`；
+  `UI-DESIGN.md` 新增 §12「MewUI 一致性约定」（含深色标题栏不能用 `Button`、`PathShape` 必须设
+  `StrokeThickness` 等实现差异）；`README` 补 `-Ui` 开关、两条 `dotnet run`、测试条数与工程结构。
+
+### 2026-11-22 · MewUI S4.5 完成：接真实引擎（组合根 / 事件桥 / 退出确认）
+
+- `src/Xdm.App.Mew/MewRuntime.cs`：MewUI 壳的组合根。`AppPaths.Resolve` → `TaskStore` →
+  `DbSettingsStore`（先 `ImportLegacyJson`）→ `SpeedLimiter` + `RangeHttpClient` +
+  `DownloadManager` → `MainWindowViewModel` + `MewDownloadActions`；`SaveSettings` 先落库再套用
+  （限速/并发/默认头即时生效，代理与重试参数下次启动生效）。
+- `src/Xdm.App.Mew/MewDownloadBridge.cs`：引擎事件 → UI 线程，新增/删除立即投递，进度 250ms 合并 4Hz；
+  在 `Application.Run(window, startup)` 的 startup 回调里构造（`DispatcherTimer` 必须属于消息循环线程）。
+- `src/Xdm.App.Mew/Shell.cs`：行内「目录」打开资源管理器；`Program.cs` 改为真实装配 + 原生消息框报错
+  （退出码 2 参数错、3 库不可用），保留 `XDM_DEMO` 演示模式（设置即演示，含 0 验空态）。
+- `MainWindow`：`ConfirmOnExit` + `Closing` 确认，有任务在跑时提示「进度会保存」；新增
+  `Controls/TitleBarChrome` 统一四个对话框标题栏（矢量 ✕，替换会在深色底上露出浅色方块的 `Button`）；
+  新建下载对话框补 `saveFolder` / `segments` 预设，跟随设置。
+- 修共享层 bug：`MainWindowViewModel.UpdateRow` 不刷分类计数（假数据永不变状态，接真引擎后
+  「下载完仍显示 已完成 0」），改为状态变化时 `RefreshCounts()`。
+- 实测（本地 `HttpListener` 提供 256KB + Range 源）：新库启动 → 新建下载 → 行变 `已完成`、
+  `全部 1 / 已完成 1`；杀进程重启后任务从库恢复；设置改默认保存目录并保存，重启后目录页回显、
+  新建下载继承；点 ✕ 弹退出确认、取消后留在主窗口；`XDM_DEMO=2` 演示模式回归通过。
+- 回归：`dotnet build XdmSharp.sln` 0 error / 0 warning，`dotnet test` 199 条全绿
+  （`NameConflictTests.Fail_...` 在并行满载时偶发失败一次，单跑与复跑均通过，属既有时间敏感用例）。
+- 新坑写进 `PLAN-MEWUI.md` 19–22：`DispatcherTimer` 必须在消息循环后建、`UpdateRow` 不刷计数、
+  对话框 ✕ 用 `Border` 自绘、新建下载漏传设置默认值。
+
+### 2026-11-22 · MewUI S4 完成：命令桥 + 行级刷新 + 中文右键菜单 + 标题栏图标
+
+- 新增 `src/Xdm.Ui.Mew/MewCommandBridge.cs`：共享层 `ICommand` → MewUI `Command`，
+  在 `window.Commands.Register(execute, canExecute)` 里转调，`CanExecuteChanged` 转 `RequerySuggested()`。
+  工具栏「恢复/暂停/删除」改挂命令，未选中行时置灰、执行走 ViewModel。
+- 行模板补行级刷新：`RowBinding` 记录每行控件组，随容器复用改写映射，行 `PropertyChanged` 就地重刷，
+  `Rows.CollectionChanged` 管订阅/退订。暂停后行内徽标、按钮文字、速度/剩余立即更新（此前要右键
+  菜单关闭时碰巧重绑才刷新）。
+- 新增 `src/Xdm.Ui.Mew/Controls/EditBox.cs`：中文右键菜单（撤销/剪切/复制/粘贴/全选，走
+  `StandardCommands`，自带快捷键提示）；搜索框、新建下载三框、设置的保存目录/代理地址、请求头
+  多行框全部换用。
+- 标题栏对齐 `UI-DESIGN.md`：底色 `#1F2B3B` + `#2C3A4E` 底线、18px 透明版 logo（嵌入
+  `Xdm.Ui.Assets/xdm-logo.png`）、三键改矢量字形（`PathShape`，hover 浮出色块、关闭键 `#C42B1C`）、
+  最大化/还原换字形。
+- 实机截图：未选中行按钮置灰 → 选中第三行点「暂停」→ 行变已暂停且状态栏 `1 个下载中`；
+  搜索框右键五项齐全，全选+剪切后文本清空；关闭键 hover 变红；最大化铺满 2560×1600 且中间键变还原。
+- 回归：`dotnet build XdmSharp.sln` 0 error / 0 warning，`dotnet test` 199 条全绿。
+- 新坑写进 `PLAN-MEWUI.md` 14–18：`Button.Background` 压不住默认模板、`Border.MouseUp` 不可靠、
+  行模板无属性绑定、`PathShape` 必须显式 `StrokeThickness`、`StandardCommands` 自带快捷键提示。
+
+### 2026-11-22 · MewUI S3 完成：新建下载 / 设置 / 关于 / 确认框
+
+- `src/Xdm.Ui.Mew/Dialogs/` 四个对话框全部落地，共用「自绘 30px 标题栏 + 1px 边框 + `Borderless` +
+  `StartupLocation.CenterOwner` + `WindowDrag.Begin`」：
+  - `ConfirmDialog`：`record struct ConfirmResult(bool Confirmed, bool OptionChecked)`，未完成任务只提示
+    临时文件、已完成任务带「同时删除已下载的文件」勾选；`MainWindow` 的 `_vm.ConfirmDelete` 接到它。
+  - `AboutDialog`：460×300，版本号读 `AssemblyInformationalVersionAttribute` 去 `+commit`。
+  - `NewDownloadDialog`：链接 / 保存到（`FileDialog.SelectFolder`）/ 文件名 / 分段数 / 立即开始；
+    校验全走 `NewDownloadViewModel.TryCreate`，提交后 `_vm.StartDownloads(requests)`。
+  - `SettingsDialog`：`TabControl` 四页（常规/连接/目录/网络）+ 保存校验，控件值回灌
+    `SettingsViewModel` 后调 `TryBuild`，失败在底部红字提示且不关窗。
+- 接线：`MainWindow.Settings`（`AppSettings`）+ `MainWindow.SaveSettings`（`Func<AppSettings,string?>`），
+  保存成功后立即覆盖 `DefaultSegments`/`DefaultSaveFolder`；S5 接 `ISettingsStore` 时只填这两个挂点。
+- 搜索框补 `✕` 清空按钮（有输入才显示，点后列表恢复）。
+- 修掉删除任务后左侧分类计数不刷新：订阅 `CategoryViewModel.PropertyChanged(Count)`，变化时重建
+  `ItemsView` 并恢复 `SelectedItem`（实机 4→3）。
+- 实机截图逐项核对：新建下载填链接→列表 2→3 行、状态栏 `显示 3 / 共 3 个任务`；设置四页布局、
+  代理单选选「自定义」后出现代理地址行、清空保存目录后点保存报「默认保存目录不能为空」且窗口不关；
+  搜索 `pdf` 过滤到 1 行、点 `✕` 回到 2 行。
+- 新踩的坑已写进 `PLAN-MEWUI.md`：`ComboBox` 自绘弹层不响应点击（改用 `RadioButton`）、
+  `TabItem.Header` 必须给元素、截图坐标要按对话框真实 `GetWindowRect` + DPI 换算。
+- 回归：`dotnet build XdmSharp.sln` 0 error / 0 warning，`dotnet test` 199 条全绿。
+
+### 2026-11-22 · MewUI S2 收尾：右键菜单 + 命令桥 + 拖入 URL
+
+- 列表右键菜单接通：`ListBox.ContextMenu(...)` + 暂停继续/打开目录/复制链接/删除四个 `MenuItem`，命令读
+  `SelectedRow`，右键按下先选中该行。菜单项只能挂 `Command`，处理器注册到窗口 `Commands`（`CommandScope`），
+  并用 `menu.SetCommandTarget(CommandTarget.From(Commands))` 指过去——不设则点击毫无反应（已实测定位）。
+  实机截图确认：右击第三行 →「暂停 / 继续」→ 该行变 `已暂停`、按钮变 `恢复`、状态栏 `3 个下载中`。
+- 拖入 URL：`AllowDrop` + `DragOver`/`Drop`，按空白切分 http(s) 链接、从路径取文件名建任务并提示；
+  `AllowDrop` 是逐元素命中，`ListBox` 也要单独设，否则指针在列表上收不到事件。
+  **未做端到端验证**：用 PowerShell + WinForms `DoDragDrop` 模拟 OLE 拖放时目标端收不到任何事件，需真机手工拖。
+- 搜索框补 `Placeholder("搜索任务")`（之前是空框，看不出用途）。
+- 回归：全量构建 0 警告，199 测试全绿。
+
+### 2026-11-22 · MewUI S2 主窗口落地（标题栏/工具栏/分类栏/行模板/状态栏）
+
+- `src/Xdm.Ui.Mew/MainWindow.cs` 从 `SpikeWindow` 升级为真正主窗口：30px 自绘深色标题栏（拖动 +
+  最小化/最大化/关闭）、40px 工具栏（新建/恢复/暂停/删除 + 居中搜索框 + 设置/关于/退出）、
+  180px 分类栏（全部/正在下载/已完成/失败 + 计数 + 选中高亮）、任务列表行模板（扩展名徽标 /
+  文件名 / `SegmentBar` 分段进度 / 进度与目录 / 大小 / 速度与剩余 / 状态徽章 / 暂停·目录·删除）、
+  空态提示、24px 状态栏；`Del` 删除、`Ctrl+N` 新建；`XDM_DEMO=<n>` 造演示数据（`0` 验空态）。
+- 新增 `Controls/RowHost.cs`：MewUI 条目容器铺满整行但按模板根 `DesiredSize` 摆放内容，
+  星号列只算内容宽度，导致右侧定宽列被摆到行外；`Grid` 子类把测量宽度报到可用宽度解决。
+- 修正 S1 误判：`WindowSize` 是 DIP 语义，之前乘 `DpiScale` 把窗口放到 1750 DIP（3062 px），
+  内容右半跑到屏幕外；同时弃用手工 `MoveTo`/`SetWindowPos`，改 `StartupLocation.CenterScreen`。
+- 踩坑 8 条记入 `docs/PLAN-MEWUI.md` §五 S2（`DockPanel` 附加属性无效、分类栏容器宽度反向撑开、
+  `HorizontalScroll=Auto` 常驻滚动条、自绘控件要 `MeasureOverride` + `Bounds.X/Y` 原点、
+  截图脚本必须 DPI 感知等）。
+- 回归：全量构建 0 警告，199 测试全绿（Xdm.Ui 65 + Xdm.Core 134）。
+
+### 2026-11-22 · 抽出 Xdm.Ui.Shared，MewUI 前端 S1 验证通过
+
+- 新工程 `src/Xdm.Ui.Shared`：`ViewModels/`、`Services/IDownloadActions.cs`、`Formatting/` 从
+  `Xdm.Ui` 整体平移（命名空间仍是 `Xdm.Ui.*`），`Xdm.Ui` 改为引用它。199 测试全绿、0 警告，
+  Avalonia 前端行为零变化。
+- 新工程 `src/Xdm.Ui.Mew`（MewUI 视图，code-first）+ `src/Xdm.App.Mew`（Win32 + Direct2D 壳），
+  包锁 0.22.1 在 `Directory.Packages.props`：视图层引 `Aprillz.MewUI.Core`，壳引
+  `Aprillz.MewUI.Backend.Direct2D` + `Aprillz.MewUI.Platform.Win32`（不引 Windows 元包，
+  实测发布产物省掉 MewVG.Core + MewVG.GL 共 196 KB）。
+- S1 四项硬点实测通过：①`Borderless` 自绘 30px 标题栏用 `ReleaseCapture` +
+  `WM_NCLBUTTONDOWN/HTCAPTION` 拖动，位移与模拟鼠标完全一致；②Direct2D 下 13/11px 中文清晰；
+  ③1000 行 `ListBox` 只创建可视区容器、滚动正确；④右键菜单弹出定位正常（独立分层窗口）。
+- 实机踩坑 9 条（`ItemHeight` 是行高真值、`Content`/`Borderless` 是属性、模板里要用 `TextBlock`、
+  窗口尺寸是物理像素等）记入 `docs/PLAN-MEWUI.md` §五 S1，S2 照此写。
+- 文档：`PLAN-MEWUI.md` 新增 S1 结论与风险表状态；`ARCHITECTURE.md` §1/§2/§9 改为双前端结构；
+  `README` 目录结构与命令同步。
+
 ### 2026-11-22 · logo 透明化并贴到标题栏
 
 - `tools/make-icons.ps1` 重写：从根 `logo.png` 生成**透明底**资源，不再做白底圆角牌。

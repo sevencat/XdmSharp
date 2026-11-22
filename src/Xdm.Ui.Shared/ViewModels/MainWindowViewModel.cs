@@ -152,8 +152,15 @@ public sealed class MainWindowViewModel : ViewModelBase
             return;
         }
 
+        var statusChanged = row.Record.Status != record.Status;
         row.Update(record);
         RefreshSummaries();
+
+        // 接真引擎后状态会自己走（下载中 → 已完成/失败），不跟着刷计数会让左侧和状态栏长期停在旧值。
+        if (statusChanged)
+        {
+            RefreshCounts();
+        }
     }
 
     public void TogglePause(DownloadRowViewModel row)
