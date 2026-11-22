@@ -1,0 +1,593 @@
+# 架构设计
+
+命名空间根：`Xdm`。工程/程序集：`Xdm.Core`、`Xdm.Ui`、`Xdm.App`、`Xdm.Core.Tests`、`Xdm.Ui.Tests`。
+目标框架：`net10.0`（不写 `-windows`）。
+
+## 1. 分层与依赖
+
+```
+Xdm.App (WinExe)                        ← 只做组装：启动链、DI、窗口生命周期
+   ├── Xdm.Ui (classlib)                ← Avalonia 视图 / ViewModel / 样式；不引启动栈
+   │      └── (无)
+   └── Xdm.Core (classlib)              ← 引擎 / HTTP / 存储 / 任务库；不引 Avalonia
+          └── (无)
+```
+
+单向依赖，禁止反向引用。判定标准：
+
+- `Xdm.Core` 出现 `using Avalonia;` → 错误
+- `Xdm.Ui` 出现 `using Avalonia.Desktop` / `Avalonia.Win32` / `SkiaSharp` / `SimdSkia` → 错误
+- `Xdm.App` 里出现业务代码（解析 HTTP、拼 SQL） → 错误
+
+## 2. 工程与包引用
+
+| 工程 | OutputType | TFM | 包引用 |
+|---|---|---|---|
+| `Xdm.Core` | Library | net10.0 | Microsoft.Data.Sqlite |
+| `Xdm.Ui` | Library | net10.0 | Avalonia |
+| `Xdm.App` | WinExe | net10.0 | Avalonia, Sevencat.Avalonia.SimdAIO, →Ui, →Core |
+| `Xdm.Core.Tests` | Exe（xunit v3） | net10.0 | xunit.v3, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk, →Core |
+| `Xdm.Ui.Tests` | Exe（xunit v3） | net10.0 | xunit.v3, Avalonia.Headless.XUnit, Avalonia.Themes.Fluent, →Ui, →Core |
+
+`Directory.Packages.props` 统一版本；`Directory.Build.props` 统一
+`net10.0` / `ImplicitUsings=enable` / `Nullable=enable` / `TreatWarningsAsErrors=true` / `Deterministic=true`。
+
+`RuntimeIdentifier` 不写进 csproj（首期也不需要），只在 `dotnet publish -r win-x64` 时给。
+
+### 2.1 渲染后端：SimdAIO（首期即采用）
+
+首期直接上 `Sevencat.Avalonia.SimdAIO 12.1.6.2`（纯托管 SimdSkia，Windows x64）。该包已把
+SimdSkia 版 `Avalonia.Win32` / `Avalonia.Win32.Automation` / `Avalonia.OpenGL` / `Avalonia.MicroCom`
+以及 SkiaSharp 命名空间兼容门面合并成单个 `Avalonia.SimdAio.dll`，并附带保持独立身份的
+`Avalonia.Themes.Fluent.dll`。所以工程**只要两个包**：
+
+```xml
+<PackageReference Include="Avalonia" />
+<PackageReference Include="Sevencat.Avalonia.SimdAIO" />
+```
+
+启动链（`src/Xdm.App/Program.cs`，唯一启动点）：
+
+```csharp
+public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
+    .UseStandardRuntimePlatformSubsystem()
+    .UseWin32()
+    // SimdSkia 走软件 framebuffer；Win32 默认 [AngleEgl, Software]，必须只留 Software
+    .With(new Win32PlatformOptions { RenderingMode = new[] { Win32RenderingMode.Software } })
+    .UseSimdSkia(static options => SimdSkiaGpuOptions.UseGpuPreferred(options)) // Direct2D 优先，失败回退 CPU
+    .LogToTrace();
+```
+
+**红线**（包内 targets 会对 Win32/Skia 冲突发警告，而本项目 `TreatWarningsAsErrors=true`，引错即构建失败）：
+
+| 禁止 | 原因 |
+|---|---|
+| `Avalonia.Desktop` / `Avalonia.Win32` / `Avalonia.Skia` / `Avalonia.HarfBuzz` | 与合并包同名类型冲突（CS0433） |
+| `Avalonia.Themes.Fluent` 包 | AIO 已在 `lib/net10.0/` 附带同版本 |
+| `Avalonia.Fonts.Inter` / `WithInterFont()` | AIO 无 Inter，走系统字体栈 |
+| `UsePlatformDetect()` / `UseSimdSkiaDesktop()` | 前者接回官方 Skia，后者要求四平台宿主 |
+| 真 `SkiaSharp` / `SimdSkia.Compatibility` 包 | 门面已并入，重复引用即同名类型冲突 |
+
+输出目录自检（`build.ps1` 后肉眼核对）：有 `Avalonia.SimdAio.dll`，
+**没有** `Avalonia.Win32.dll` / `Avalonia.Skia.dll` / `SkiaSharp.dll`，也没有任何 `runtimes/**/native/*.dll`。
+
+### 2.2 回退标准桌面栈的口子（保留能力，不做）
+
+将来若要回到官方 `Avalonia.Desktop`（例如要支持 macOS/Linux，或 AIO 出现阻塞问题），
+改动只允许发生在 `Xdm.App.csproj` 的包引用 + `Program.cs` 的 `BuildAvaloniaApp()`：
+
+```csharp
+public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
+    .UsePlatformDetect()
+    .WithInterFont()
+    .LogToTrace();
+```
+
+为让这次回退保持廉价，**现在就要守**：
+
+| # | 约束 | 原因 |
+|---|---|---|
+| 1 | 视图/业务代码不依赖 `SkiaSharp` 类型（要用也只按 Avalonia `IImage` 处理） | 门面只在 AIO 包里，回退后换成真 SkiaSharp 程序集 |
+| 2 | 只用 Fluent 主题，不引 `Avalonia.Themes.Simple` | 两边都只有 Fluent |
+| 3 | 主题只在 `App.axaml` 声明，`Xdm.Ui` 不硬编码主题类 | 回退只换包 |
+| 4 | 不用 GPU/合成器专有 API（`Composition` 特效、高端 `RenderOptions`） | AIO 主路径是软件光栅 |
+| 5 | 启动链/平台选项只写在 `Program.cs` 的 `BuildAvaloniaApp()` | 切换点必须唯一 |
+| 6 | 窗口相关不直接 P/Invoke，全部走 Avalonia 抽象 | 同上 |
+
+> `Avalonia.Headless` 依赖 `Avalonia.HarfBuzz` / `Avalonia.Fonts.Inter`，与 AIO 路线冲突，
+> 所以 `Xdm.Ui.Tests` **只引 `Xdm.Ui` + Headless，不引 `Xdm.App`** —— AIO 永不进测试进程。
+
+### 2.3 启动与常驻开销基线（对照参考实现）
+
+已安装的参考程序：`D:\network\XDM\xdm-app.exe`（jpackage 产物，版本 `9.0.11`，JDK `25.0.4.1`）。
+看它的启动参数（`D:\network\XDM\app\xdm-app.cfg`）能读出设计意图 —— 下载器是**常驻后台**的，
+冷启动与内存都被刻意压过：
+
+| 参考实现的做法 | 意图 | 我们的对应手段 |
+|---|---|---|
+| `-XX:+UseZGC` + 极小堆（`-Xms6m`、`-XX:-AlwaysPreTouch`） | 低延迟 GC、常驻内存小 | .NET 默认 Server/Workstation GC 即可；不显式调 `GCSettings` |
+| `-XX:SharedArchiveFile=xdm-zgc.jsa`（AppCDS） | 跳过类加载，冷启动快 | `PublishReadyToRun=true`（发布档）；不追求 Native AOT |
+| `-XX:TieredStopAtLevel=1`、`CICompilerCount=1`、`ConcGCThreads=1` | 启动期不浪费 CPU 在编译/并行 GC 上 | 保持默认分层编译；启动路径别做重活 |
+| `-Djava.library.path=$APPDIR` 预载原生库 | 避免首次调用时加载抖动 | 首帧前不加载大资源；图标走 `avares://` 编译资源 |
+
+**实测基线**（2026-11-22，`Release`、未开 R2R、无任务、空窗口）：
+
+| 指标 | 实测 | 目标（M6 收尾） |
+|---|---|---|
+| 冷启动到窗口可见 | 759 / 807 / 1175 ms（中位 807） | ≤ 900 ms（P95，开 R2R 后） |
+| 空闲私有内存 | 100 MB | ≤ 120 MB |
+| 空闲工作集 | 139 MB（含共享页，仅供参考） | — |
+
+- 启动期**不同步**做网络或磁盘重活：任务库加载、更新检查、日志轮转放到首帧之后
+  （`OnFrameworkInitializationCompleted` 里投递，不阻塞第一帧）。
+- 发布形态：`dotnet publish -c Release -r win-x64` 用 AIO 默认的**单文件、不压缩**
+  （无原生库要解压，冷启动不吃亏），再叠加 `PublishReadyToRun=true`；
+  **禁止** `EnableCompressionInSingleFile`。
+- 内存结论：原先拍的 80 MB 不现实（Avalonia 空壳已 100 MB 私有），改为 120 MB 上限并作为回归基线。
+
+## 3. Core 结构
+
+```
+src/Xdm.Core/                       命名空间根 Xdm.Core
+  Configuration/
+    AppSettings.cs                  用户设置（JSON 落盘：限速/代理/段数/目录/重名策略）
+    ISettings.cs
+  Http/
+    IRangeHttpClient.cs             抽象，便于测试注入
+    RangeHttpClient.cs              SocketsHttpHandler + HttpClient 实现
+    HttpRangeRequest.cs             请求参数（url/offset/length/headers/cookie/ifRange）
+    HttpResponseInfo.cs             状态码/ContentLength/ContentRange/LastModified/FinalUrl/Disposition
+    ConnectOutcome.cs               **协议无关**语义：Ok / Retry / Busy / Unsupported / Expired / Rejected（见 §12.1）
+  Storage/
+    PartFile.cs                     单句柄 + RandomAccess 偏移写、FlushToDisk、SetLength
+    AtomicJson.cs                   File.Move(overwrite) 原子写 JSON
+    FileNaming.cs                   Content-Disposition/URL 推导、非法字符清洗、唯一名
+    FolderPublisher.cs              .xdm-part → 最终名的原子发布（三种重名策略）
+  Downloads/
+    Segment.cs                      段模型
+    DownloadTask.cs                 任务模型 + 状态机 + 段表（锁保护）；含 TaskKind / ParentId / Files
+    SegmentVerifier.cs              段完成校验（V2 LFS sha256 / V3 piece hash）；首期为 null 不做校验
+    SegmentRunner.cs                单段下载循环（← HttpChunkRetriever）
+    DownloadEngine.cs               调度器（← HttpDownloader）
+    TailRacer.cs                    尾段竞速（M6）
+    ProgressTracker.cs              速率/ETA 滑动窗口
+  Scheduling/
+    DownloadQueue.cs                队列与全局并发闸门
+    ConnectionSlots.cs              全局连接数配额
+    SpeedLimiter.cs                 令牌桶限速（全局）
+    RetryPolicy.cs                  指数退避 + 重试预算
+  Tasks/
+    TaskStore.cs                    SQLite 持久化
+    DownloadRecord.cs               列表行数据（供 Ui 只读消费）
+  Errors/
+    DownloadError.cs                错误枚举 + 中文文案
+```
+
+## 4. 关键类型（签名级）
+
+```csharp
+namespace Xdm.Core.Downloads;
+
+public enum SegmentStatus { Ready, Downloading, Finished, Failed, Cancelled }
+public enum DownloadStatus { Ready, Downloading, Paused, Assembling, Finished, Failed }
+
+public sealed class Segment
+{
+    public long Id { get; init; }
+    public long Offset { get; init; }
+    public long Length { get; set; }            // 可被切分放大
+    public long Downloaded;                      // 原始字节计数，Interlocked
+    /// <summary>已确认落盘（fsync）的字节数。进度与状态文件只认它，对应 Kotlin 的 Chunk.synced。</summary>
+    public long Synced;
+    public SegmentStatus Status;
+    public long LastTakeOverTicks;
+}
+
+public sealed class DownloadTask
+{
+    public long Id { get; init; }
+    /// <summary>协议种类。首期只实现 Http；HuggingFace / Torrent 为 V2 / V3，见 §12。</summary>
+    public TaskKind Kind { get; init; }
+    /// <summary>父任务 id（HF 模型包、BT 多文件 torrent）。首期恒为 0（自己就是顶层）。</summary>
+    public long ParentId { get; init; }
+    public string Url { get; set; }
+    public string? FinalUrl { get; set; }        // 本次会话记录的重定向目标，不持久化
+    public string FileName { get; set; }
+    public string TargetFolder { get; set; }
+    public string TempFolder { get; set; }
+    public long? TotalSize { get; set; }
+    public long Downloaded;                      // 只累加 Synced
+    public DownloadStatus Status;
+    public string? Validator { get; set; }       // If-Range 用 Last-Modified，不用 ETag
+    public bool NoRangeSupport;
+    public bool FillsGaps;                       // FAT32/exFAT：无稀疏文件
+    public IReadOnlyDictionary<long, Segment> Segments;
+    /// <summary>段完成校验（V2 LFS sha256 / V3 piece hash）。首期恒为 null。</summary>
+    public SegmentVerifier? Verifier { get; set; }
+    public PartFile? PartFile;
+    public TaskCompletionSource<CommitResult> Completion;
+}
+
+/// <summary>协议无关的连接结果。HTTP 状态码只允许出现在 RangeHttpClient 内部。</summary>
+public enum SourceOutcome
+{
+    Ok,
+    Retry,          // 瞬时错误（超时/5xx/连接重置），消耗重试预算
+    Busy,           // 对端限流（HTTP 429/503），按 RetryAfter 等待，不消耗预算
+    Unsupported,    // 不支持区间（HTTP 恒回 200 / BT 无可用 peer）
+    Expired,        // 链接失效（HTTP 403/410、HF 签名 URL 过期）→ 重新解析来源
+    Rejected,       // 确定性失败（404/认证失败/校验不符）
+}
+
+public interface IRangeHttpClient
+{
+    Task<SourceOutcome> ConnectAsync(HttpRangeRequest request, CancellationToken ct);
+    // 响应体以流返回，由 SegmentRunner 阻塞读取（不在此层做缓冲）
+    // 约定：本接口只表达"按区间取字节"，不得让调用方判断 HTTP 状态码。
+}
+```
+
+`TaskKind`：`Http`（首期）、`HuggingFace`（V2）、`Torrent`（V3）。
+新增种类只允许"新增枚举值 + 新增引擎实现"，不允许改 `DownloadEngine` 的段调度逻辑。
+
+`DownloadEngine` 照搬 `HttpDownloader.kt` 的调度骨架，方法一一对应：
+
+| C# | Kotlin（`downloaders/web/http/`） | 说明 |
+|---|---|---|
+| `Start()` | `HttpDownloader.start()`:216 | 建段、开写句柄、起线程 |
+| `Resume()` | `resume()`:248 | 读状态、归一化段、必要时整任务重来 |
+| `OnSegmentFinished(id)` | `onChunkFinished()`:322 | **切分段 / 接管 / 起竞速** 的主决策点 |
+| `OnSegmentFailed(id, err)` | `onChunkFailed()`:392 | 重试预算与整体失败 |
+| `OnLinkRefused(id)` | `onLinkRefused()`:411 | 限流等 vs 链接过期 |
+| `OnSegmentConnected(id, info)` | `onChunkConnected()`:452 | 首次响应确认大小/Range 能力 |
+| `FindMaxSegment()` | `findMaxChunk()`:529 | 找可切分的最长段 |
+| `SplitSegments()` | `splitChuck()`:553 | 二分 + 立即落状态 |
+| `TryTakeOver(id, max)` | `takeOverChunk()`:608 | 并入相邻未开始段，复用连接 |
+| `StartTailRacers()` | `startTailRacers()`:660 | 尾部竞速；**限速开启时直接返回** |
+| `NeedsAllocation/Locate()` | `needsAllocation():745` / `allocate():764` | 无稀疏文件预填充（M6） |
+| `FlushBacklog/SyncData` | `updateBytesDownloaded():829` / `syncData():978` | 30s 强制刷盘 + 落状态 |
+| `FinishDownload()` | `finishDownload():928` | 关闭句柄 → 发布 → 回调 |
+| `SegmentRunner.Run()` | `HttpChunkRetriever.retrieveChunk():39` | 单段循环 |
+| `SegmentRunner.Connect()` | `connect():198` | Range 能力判定 |
+| `SegmentRunner.CopyWithLength()` | `copyDataWithLength():320` | 带长度拷贝 + 校验 |
+| `SegmentRunner.CopyUntilEof()` | `copyDataWithoutLength():436` | 无长度模式 |
+
+## 5. 必须保持一致的语义（复刻时最易错）
+
+1. **`Synced` 才是进度**。`Downloaded` 是内存计数，`Synced` 是 fsync 后的值；状态文件与
+   UI 进度都用 `Synced` 之和。恢复时 `Synced := 读到的值`。
+2. **`If-Range` 用 `Last-Modified`**（首次响应的值），不用 `ETag`——同文件不同镜像 ETag 不同，
+   用 ETag 会导致换镜像即无法续传。
+3. **Range 能力判定要严格**：
+   - 请求 `bytes=a-b` 返回 `200` → 不支持 Range，整任务转单流 → `NoRangeSupport = true`
+   - `Content-Length != b-a+1` → 拒写该段（不写坏数据）
+   - 无 `Content-Length` → 只能单流读到 EOF
+4. **拒绝分类**：403/410 且"还有别的段在收数据"或 15s 内有字节流入 → 判定服务器连接数限制，
+   等待重试且不消耗重试预算；否则判定链接过期 → 失败。
+5. **切分条件**：剩余可切字节 ≥ 256KB、目标段 5 秒内未被接管、活动段数 < `MaxSegments`。
+   切分后**立即**落盘状态，避免切完崩溃丢段。
+6. **竞速与限速互斥**：限速启用时不启动尾段竞速。
+7. **发布是原子改名**：全程写 `.<id>.xdm-part`（放目标目录，点前缀 + `.xdm-part` 后缀，与参考实现
+   `.<hexid>.xdm-part` 对齐，避免与用户文件撞名、也避免被误认为完整文件），完成后同盘 `File.Move` 到最终名；
+   跨盘则复制 + 删除。重名按配置：覆盖 > 自动改名 > 失败。
+8. **父任务进度 = Σ 子任务 `Synced`**，父自身不计字节；父状态机只在"全部子完成 / 任一子失败且不可重试"
+   时迁移。首期子项恒为 1，语义照此实现（V2/V3 直接复用）。
+
+## 6. 线程模型
+
+```
+UI 线程 (Dispatcher)              引擎
+    │  Post(节流 250ms)             │
+    │◄──────── 进度事件 ────────────┤
+    │                               ├─ 调度线程（1 个/任务）：切分、接管决策
+    │                               ├─ 段线程（N 个，N ≤ MaxSegments）：阻塞读 + 写
+    │                               └─ 同步线程：每 30s fsync 全部句柄 + 落状态
+    └── 用户操作（暂停/删除） ──► 置位 CancellationToken + 通知调度线程
+```
+
+- 段线程用 `new Thread(IsBackground=true)`（长驻、阻塞 IO，占线程池会饿死其它任务）。
+- 段表：`DownloadTask` 内部 `lock` 保护 `Dictionary<long, Segment>`；锁内只做状态迁移，
+  IO 一律在锁外。
+- 单写句柄：`PartFile` 全局一个 `SafeFileHandle`，各段通过
+  `RandomAccess.Write(handle, span, offset)` 并发写；暂停/完成/失败时统一关闭。
+- UI 永不读引擎可变字段：通过 `IDownloadObserver` 拿到不可变快照（`SegmentSnapshot` record）。
+
+## 7. 持久化
+
+### 7.1 SQLite（任务库）
+
+**位置：`AppContext.BaseDirectory\xdm.db`** —— 与 exe 同目录（绿色版语义：目录即数据，拷走就能走）。
+
+```csharp
+// Xdm.Core/Tasks/TaskStore.cs
+public static string DefaultDbPath =>
+    Path.Combine(AppContext.BaseDirectory, "xdm.db");
+
+// 连接串走 SqliteConnectionStringBuilder：
+//   DataSource = DefaultDbPath
+//   Mode       = ReadWriteCreate
+//   Pooling    = true
+//   DefaultTimeout = 10
+```
+
+约束：
+
+- `xdm.db` 旁边还会有 `xdm.db-wal`、`xdm.db-shm`（WAL 模式），**备份/迁移必须三件一起拷**，
+  或先执行 `PRAGMA wal_checkpoint(TRUNCATE)` 再拷；只拷 `.db` 会丢最新事务。
+- 目录**不可写**时（装在 `Program Files`、或 exe 在只读介质）→ 回退
+  `%LOCALAPPDATA%\Xdm\xdm.db`，并在状态栏/日志提示"任务库已回退到用户目录"。
+  判定方式：启动时试着建库，捕获 `SqliteException`/`UnauthorizedAccessException` 后降级，不弹窗阻断。
+- 库文件路径解析（`AppPaths.DbPath`，优先级从高到低）：
+
+  | # | 来源 | 结果 |
+  |---|---|---|
+  | 1 | 命令行 `--db <path>` / `--db=<path>` | 该路径 |
+  | 2 | 环境变量 `XDM_DB` | 该路径 |
+  | 3 | 环境变量 `XDM_DATA_DIR`（目录语义） | `<dir>\xdm.db` |
+  | 4 | `AppContext.BaseDirectory` | `<exe 目录>\xdm.db` |
+  | 5 | 第 4 步目录不可写 | `%LOCALAPPDATA%\Xdm\xdm.db` |
+
+- **`state/` 恒为"库文件所在目录"下的 `state\`**（`AppPaths.StateDir`），两者永不拆开：
+  `--db D:\xdm\my.db` → 库 `D:\xdm\my.db` + 快照 `D:\xdm\state\`。
+- 参数边界：相对路径按**当前工作目录**转绝对路径（`dotnet run -- --db .\dev.db` 落在仓库根）；
+  父目录不存在则创建；`--db` 指向已存在的**目录**或缺少取值 → 报错并以返回码 `2` 退出
+  （不猜、不静默回退到默认路径，否则用户会对着错误的库排查）。
+- 解析位置：**`Xdm.App` 负责读命令行**，解析出 `AppPaths` 后注入 `TaskStore` / 引擎；
+  `Xdm.Core` 不得调用 `Environment.GetCommandLineArgs()`（测试要能直接构造 `new AppPaths(dbPath)`）。
+- 单实例：不同 `--db` 视为不同实例，允许并存；同一库被第二个实例打开时 WAL 仍可用，
+  但"暂停/删除"会互相干扰 → M6 再定单实例锁，首期只在日志里警告。
+- `Xdm.Ui.Tests` / `Xdm.Core.Tests` 一律用 `:memory:` 或临时目录下的随机文件名，
+  **禁止**写到 exe 目录（否则并发测试互相踩库，且污染构建产物）。
+- 发布时不要打包任何预置 `xdm.db`；首次运行自动建表（`CREATE TABLE IF NOT EXISTS` + `user_version` 记版本）。
+
+```sql
+PRAGMA journal_mode=WAL;
+
+CREATE TABLE tasks (
+  id              INTEGER PRIMARY KEY,
+  kind            INTEGER NOT NULL DEFAULT 0,   -- 0 Http 1 HuggingFace 2 Torrent（V2/V3）
+  parent_id       INTEGER REFERENCES tasks(id) ON DELETE CASCADE,  -- 两级任务：模型包 → 文件
+  url             TEXT    NOT NULL,
+  file_name       TEXT    NOT NULL,
+  target_folder   TEXT    NOT NULL,
+  temp_folder     TEXT    NOT NULL,
+  total_size      INTEGER,
+  downloaded      INTEGER NOT NULL DEFAULT 0,   -- 只记 Synced 之和
+  status          INTEGER NOT NULL,             -- 0 Ready 1 Downloading 2 Paused 4 Finished 5 Failed
+  max_segments    INTEGER NOT NULL,
+  headers_json    TEXT,
+  cookie          TEXT,
+  validator       TEXT,                         -- If-Range: Last-Modified 原样串
+  no_range_support INTEGER NOT NULL DEFAULT 0,
+  content_sha256  TEXT,                         -- V2：LFS sha256 / V3：整体校验（可空）
+  source_meta_json TEXT,                        -- V2：repo/revision/path；V3：infohash。首期为 NULL
+  error_code      INTEGER,                      -- DownloadError；5 且为 Disk 时恢复成 DiskError
+  category_id     INTEGER,
+  name_policy     INTEGER NOT NULL DEFAULT 0,   -- 0 Rename（默认）1 Overwrite 2 Fail
+  created_at      INTEGER NOT NULL,
+  finished_at     INTEGER
+);
+
+CREATE TABLE segments (
+  task_id   INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  seg_id    INTEGER NOT NULL,
+  offset    INTEGER NOT NULL,
+  length    INTEGER NOT NULL,
+  synced    INTEGER NOT NULL,
+  status    INTEGER NOT NULL,
+  PRIMARY KEY (task_id, seg_id)
+);
+```
+
+- 启动：`status=Queued/Downloading` 的记录一律改 `Paused`（进程被杀残留）；`Finished` 的校验目标文件，
+  不存在则降级 `Failed`。
+- 写库时机：状态迁移、切分、每 30s 同步、完成/失败。**不在每秒进度里写库**。
+- 当前实现：`temp_folder` 与 `target_folder` 相同（`.xdm-part` 就在目标目录，发布是同目录 `File.Move`）；
+  `name_policy` 是首版就带的列（重名策略），不靠 `ALTER` 迁移。
+- 参考实现用自定义 tagged 二进制（`task-<id>.info`、`<id>.state`、`active/paused/finished-downloads.dat`），
+  这里**不照搬**：SQLite 更适合后续加分类/搜索/历史。
+
+### 7.2 状态文件 `state/<id>.json`（进度，独立于 SQLite）
+
+目录基准与任务库一致：`<AppContext.BaseDirectory>\state\`（与 `xdm.db` 同级，回退时一起回退到
+`%LOCALAPPDATA%\Xdm\state\`）。这样把整个程序目录拷走 = 连未完成任务一起带走。
+
+```json
+{
+  "version": 1,
+  "id": 1712,
+  "totalSize": 104857600,
+  "validator": "Tue, 03 Nov 2026 08:11:00 GMT",
+  "noRangeSupport": false,
+  "segments": [
+    { "id": 0, "offset": 0,        "length": 26214400, "synced": 26214400, "status": "Finished" },
+    { "id": 1, "offset": 26214400, "length": 26214400, "synced": 8221137,  "status": "Downloading" }
+  ]
+}
+```
+
+写入方式：写 `<id>.json.tmp` → `FileStream.Flush(true)` → `File.Move(tmp, final, overwrite: true)`。
+`version` 为格式演进留口。
+
+## 8. UI ↔ 引擎边界
+
+```csharp
+namespace Xdm.Core.Downloads;
+
+public interface IDownloadObserver
+{
+    void OnTaskStatusChanged(long id, DownloadStatus status);
+    void OnProgress(long id, long syncedTotal, double bytesPerSecond, TimeSpan? eta);
+    void OnSegmentsChanged(long id, IReadOnlyList<SegmentSnapshot> segments); // 仅详情窗口打开时订阅
+    void OnCompleted(long id, string finalPath);
+    void OnFailed(long id, DownloadError error, string detail);
+}
+
+public readonly record struct SegmentSnapshot(long Id, long Offset, long Length, long Synced, SegmentStatus Status);
+```
+
+- 引擎回调发生在任意线程；`Xdm.App` 里的 `DownloadManager` 负责缓存最新值 + 250ms 合并 +
+  `Dispatcher.UIThread.Post`。
+- 任务列表行只订阅 `OnProgress` / `OnTaskStatusChanged`；详情窗口打开时才订阅 `OnSegmentsChanged`，
+  避免 N 段 × 1Hz 的无谓分配。
+- ViewModel 不持有 `DownloadTask`，只持有 `DownloadRecord`（不可变视图数据）。
+
+## 9. Ui 层结构
+
+```
+src/Xdm.Ui/                          命名空间根 Xdm.Ui
+  Views/
+    MainWindow.axaml                 + .axaml.cs（仅 InitializeComponent）
+    NewDownloadWindow.axaml
+    DownloadDetailWindow.axaml
+    SettingsWindow.axaml
+    AboutWindow.axaml
+    ConfirmDialog.axaml
+  ViewModels/
+    ViewModelBase.cs                 INotifyPropertyChanged + SetProperty
+    MainWindowViewModel.cs
+    DownloadRowViewModel.cs
+    NewDownloadViewModel.cs
+    SettingsViewModel.cs
+  Controls/
+    SegmentBar.cs                    DrawingContext 直绘的分段条
+    SpeedGraph.cs                    速度曲线
+    DownloadRow.axaml                列表行模板
+  Converters/
+    DownloadStatusTextConverter.cs   状态 → 中文文案（唯一来源，便于测试断言）
+    BytesToTextConverter.cs
+  Services/
+    IShellService.cs                 打开文件/目录/对话框（测试可打桩）
+    IDispatcherFacade.cs             封装 Dispatcher，便于单测
+  Styles/
+    AppStyles.axaml                  Token 与行样式
+```
+
+`Xdm.App` 只保留：`Program.cs`（启动链）、`App.axaml(.cs)`（主题挂载、主窗口创建）、
+`AppBootstrapper.cs`（DI 装配、设置加载、任务库初始化）。
+
+## 10. Kotlin → C# 文件对照
+
+| 参考实现 | 本项目 | 处理方式 |
+|---|---|---|
+| `downloaders/web/http/HttpDownloader.kt` (1038) | `Xdm.Core/Downloads/DownloadEngine.cs` | 照搬结构，锁改 `lock`，删 HLS/DASH/BT 分支 |
+| `downloaders/web/http/HttpChunkRetriever.kt` (637) | `Xdm.Core/Downloads/SegmentRunner.cs` | 照搬；OkHttp 换 `IRangeHttpClient` |
+| `downloaders/web/http/Models.kt` (214) | `Xdm.Core/Downloads/Segment.cs` + `DownloadTask.cs` | `AtomicLong` → `Interlocked`/`Volatile` |
+| `downloaders/web/http/TailRacer.kt` (134) | `Xdm.Core/Downloads/TailRacer.cs` | 照搬（M6） |
+| `downloaders/web/http/PartAllocation.kt` (125) | `Xdm.Core/Storage/PartFile.cs` 局部 | 照搬（M6，低优先级） |
+| `downloaders/web/StateSaver.kt` (390) | `Xdm.Core/Tasks/TaskStore.cs` + `Storage/AtomicJson.cs` | 二进制格式换 JSON，只保留 HTTP 部分 |
+| `downloaders/web/ProgressTracker.kt` (289) | `Xdm.Core/Downloads/ProgressTracker.cs` | 照搬滑动窗口 |
+| `downloaders/web/SpeedLimiter.kt` (82) | `Xdm.Core/Scheduling/SpeedLimiter.cs` | 照搬令牌桶；改全局跨任务 |
+| `downloaders/web/ConnectionSlots.kt` (82) | `Xdm.Core/Scheduling/ConnectionSlots.cs` | 照搬 |
+| `util/RetryPolicy.kt` (170) | `Xdm.Core/Scheduling/RetryPolicy.cs` | 照搬退避与预算 |
+| `storage/Storage.kt` + `NioFileOps.kt` (455) | `Xdm.Core/Storage/PartFile.cs` | 用 `SafeFileHandle` + `RandomAccess` 重写，代码量减半 |
+| `util/AtomicIO.kt` (132) | `Xdm.Core/Storage/AtomicJson.cs` | 用 `File.Move(overwrite)` |
+| `network/http/impl/HttpClientImpl.kt` (376) | `Xdm.Core/Http/RangeHttpClient.cs` | `SocketsHttpHandler` 重写：手动跟重定向（记 FinalUrl）、`MaxConnectionsPerServer`、逐次读超时 |
+| `downloaders/TaskInfoDB.kt` | `Xdm.Core/Tasks/TaskStore.cs` | 改 SQLite |
+| `xdm-manager/DownloadManager.kt` (2300) | `Xdm.App/DownloadManager.cs` + `Xdm.Core/Scheduling/DownloadQueue.cs` | 只取 HTTP 相关：队列、并发、发布、事件 |
+| `xdm-app/ui/**` (68 文件) | `Xdm.Ui/**` | 重新设计，见 `UI-DESIGN.md` |
+
+## 11. HTTP 客户端要点
+
+```csharp
+new SocketsHttpHandler {
+    MaxConnectionsPerServer = settings.MaxSegments,      // 与段数上限一致
+    AllowAutoRedirect = false,                           // 自己跟，才能记 FinalUrl 与 Last-Modified
+    AutomaticDecompression = DecompressionMethods.None,   // 下载文件不要透明解压
+    ConnectTimeout = TimeSpan.FromSeconds(15),
+    PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+    Proxy = settings.BuildProxy(),
+}
+```
+
+- 读超时用"每次读之间"的计时器实现（对应 Kotlin `readTimeoutSeconds = 60`），
+  不能只用 `HttpClient.Timeout`（那是整个请求的超时）。
+- 取消：`CancellationToken` + 主动 `response.Dispose()` 打断阻塞读（对应 Kotlin `HttpResponse.cancel`）。
+- Cookie：任务级 `Cookie` 头原样附带，不启用 `CookieContainer`（避免跨任务污染）。
+
+## 12. 后续扩展：HF 模型下载（V2）与 BT 下载（V3）
+
+首期只实现 HTTP 单文件下载，但**任务模型、来源接口、schema、UI 行模板必须现在就长成能容纳
+多协议 / 多文件 / 带校验的形状**。本节是"现在不做，但别做死"的契约清单。
+
+### 12.1 首期必须守住的 6 条契约
+
+| # | 契约 | 违反后果 |
+|---|---|---|
+| 1 | 任务表有 `kind` + `parent_id`，任务模型支持父子（父 = 模型包 / torrent，子 = 文件）；首期就写进去，子项数恒为 1 | V2/V3 要改 schema + 迁移 + UI，返工面最大 |
+| 2 | 多文件任务的 `Downloaded` 由子任务 `Synced` 汇总，不在父上单独计数 | 父行进度与子行不一致，恢复时对不上 |
+| 3 | 引擎只见 `SourceOutcome` 语义，**不见 HTTP 状态码**；429/403 的判定封在 `RangeHttpClient` 内 | BT/镜像站无法复用调度逻辑，只能复制一份 |
+| 4 | `Segment` 支持可选 `SegmentVerifier`（校验通过才 `Synced`）；首期传 null 但字段与调用点都在 | V3 piece 校验要改 `SegmentRunner` 核心循环 |
+| 5 | 字节写入只经 `PartFile`（偏移写），不允许"整文件顺序写"的捷径 | BT piece 乱序到达无处落盘，等于重写存储层 |
+| 6 | UI 行模板按"任务行 + 可选子行"设计，进度/大小/速度对父子同构；首期只渲染单行 | HF 千文件、BT 多文件在列表里无处展开 |
+
+对应的 schema 预留（已在 §7.1 DDL 内）：`tasks.kind`、`tasks.parent_id`、`tasks.content_sha256`、
+`tasks.source_meta_json`。`source_meta_json` 存协议私有信息（V2：repo / revision / path；
+V3：infohash / torrent 路径），首期恒为 NULL。
+
+### 12.2 HF（HuggingFace）模型下载
+
+一个「模型任务」= 父任务 + N 个文件子任务。每个子文件仍走 `DownloadEngine`（HTTP Range 引擎），
+所以**引擎零改动**，需要新写的是"仓库解析 + 文件编排"。
+
+流程：
+
+1. `GET {endpoint}/api/models/{repo}`（或 `/api/models/{repo}/tree/{rev}?recursive=true&expand=true`）
+   → 文件清单：`path`、`size`、`lfs.oid`（= sha256）、`lfs.size`。可选 `?blobs=true`。分页用 `Link` 头。
+2. 逐文件 `GET {endpoint}/{repo}/resolve/{rev}/{path}` → **302** 到 CDN
+   （`cdn-lfs.hf.co` / `cas-bridge.xethub.hf.co` / S3 预签名）。必须 `AllowAutoRedirect=false` 自己跟，
+   因为要记录每跳的 `Authorization` 剥离规则：**跨域跳转到 CDN 时不带 Bearer**（否则 S3 拒绝）。
+3. 预签名 URL 有时效（约 1 小时）→ 大文件中途失效返回 403 → `SourceOutcome.Expired`
+   → 重新调 `resolve` 拿新 URL 续传，**不消耗重试预算**。
+4. 认证：`Authorization: Bearer <token>`；token 来源顺序：任务级 → 设置 → `HF_TOKEN` 环境变量。
+5. 镜像：`HF_ENDPOINT`（如 `https://hf-mirror.com`），设置页可改；清单与 resolve 都走同一 endpoint。
+6. 并发：**文件级并发（默认 4）+ 文件内分段并发**，两者共用 `ConnectionSlots` 全局配额；
+   避免 1000 文件 × 8 段 = 8000 连接的灾难。
+7. 校验：`size` 一致 → 写入 `content_sha256`；完成后校验（LFS 文件才有 sha256）。
+   已存在且 size/sha256 一致 → 跳过（增量更新模型）。
+8. 目录：`path` 里的子目录必须保留（`onnx/model.onnx` → 目标目录下的 `onnx/model.onnx`）；
+   `.gitattributes` 等小文件同样下载。
+9. revision：记 `main` / tag / commit hash；`source_meta_json` 存 `{endpoint, repo, revision, path}`。
+
+命名空间规划：`Xdm.Core.HuggingFace/`（`HubClient.cs`、`RepoManifest.cs`、`HfSource.cs`、
+`HfTaskPlanner.cs`）。不放进 `Http/`，因为它属于"来源编排"，不是传输层。
+
+测试：不访问真实 Hub —— 用 `FakeHttpServer` 起一个假 Hub（`/api/models/...` 返回固定清单、
+`/resolve/...` 302 到自身另一路径），再叠加"签名 URL 过期一次"的剧本。
+
+### 12.3 BitTorrent（V3）
+
+**结论：BT 用独立引擎，不复用 `DownloadEngine`。** 共享的是基础设施：
+`PartFile`（偏移写）、`SpeedLimiter`（含上传限速）、`ConnectionSlots`、`TaskStore`、`ProgressTracker`、UI。
+
+| 维度 | HTTP 分段引擎 | BT 引擎 |
+|---|---|---|
+| 数据单位 | 段（可任意切） | piece（长度由 torrent 定，**不可切**） |
+| 来源 | 单个服务器 | 多个 peer（每个 peer 只给部分 piece） |
+| 完成判定 | 字节收到即计入 `Synced` | 整 piece 校验通过才计入 |
+| 重试对象 | 同一 URL | 换 peer / 等 swap |
+| 上传 | 无 | 有（做种/上报），首期可关 |
+
+要点：
+
+- 协议面：BEP 3、5(DHT)、6(fast)、9(metadata/magnet)、10(扩展)、11(PEX)、15(UDP tracker)、19(webseed)。
+- 元数据：`.torrent`（bencode 解析）与 magnet（BEP 9 交换）；v1 SHA1 piece、v2 SHA256 都要认。
+- piece ↔ `Segment`：`Segment.Length` 取 piece 长度，`Segment.Verifier` 存 piece hash；
+  一个 piece 可能来自多个 peer（分块请求），拼齐后校验，通过才 `Synced += length`。
+- 磁盘：稀疏写（`PartFile.SetLength(total)`），不预分配；完成后逐 piece 校验再发布。
+  `PartAllocation`（无稀疏文件预填充）对 BT 无意义，BT 只需保证"不写未校验数据到可见区"。
+- 多文件 torrent → 天然两级任务；"仅下载选中文件"通过跳过对应 piece 实现（piece 跨文件时要整块下）。
+- 做种：V3 只支持"完成后按配置不做种 / 最小做种比例"；上传调度、私有 tracker 严格上报放 V4。
+- webseed 是 HTTP Range → 直接复用 `SegmentRunner`，这是 V3 里唯一能复用 HTTP 引擎的路径。
+- 库选型：优先 `MonoTorrent`（MIT，GPL-3.0 兼容），封装在 `Xdm.Core.BitTorrent/ITorrentEngine` 之后，
+  保证将来可替换为自研最小实现（仅 tracker + 无 DHT）。选型结论记 `PROGRESS.md` 待决事项。
+
+命名空间规划：`Xdm.Core.BitTorrent/`（`TorrentEngine.cs`、`TorrentMetadata.cs`、`PeerSwarm.cs`、
+`PieceStore.cs`）。`PieceStore` 内部用 `PartFile` 偏移写，piece 校验逻辑集中在此，不散落到 UI/任务层。
+
+### 12.4 工程演进（不新增工程，除非被迫）
+
+- V2：仍是 `Xdm.Core`，只加命名空间 `Xdm.Core.HuggingFace`；不需要新包（HTTP 已够）。
+- V3：若引 MonoTorrent，它进 `Xdm.Core`（或单独 `Xdm.Core.BitTorrent` 程序集后由 Core 引用）。
+  **不得**让它污染 `Xdm.Ui` / `Xdm.App`（保持 UI 与具体协议无关）。
+- 任何阶段都不允许在 `Xdm.Ui` 里出现协议相关 `using`（`System.Net.Http`、MonoTorrent 等）。

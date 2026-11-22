@@ -1,0 +1,152 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="using:Xdm.Ui.Controls"
+        xmlns:vm="using:Xdm.Ui.ViewModels"
+        x:Class="Xdm.Ui.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="XDM Sharp"
+        Width="1080" Height="680"
+        MinWidth="760" MinHeight="420"
+        WindowStartupLocation="CenterScreen">
+
+  <Window.Styles>
+    <Style Selector="ListBoxItem">
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    </Style>
+    <Style Selector="Button.row-action">
+      <Setter Property="Opacity" Value="0" />
+    </Style>
+    <Style Selector="ListBoxItem:pointerover Button.row-action">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="ListBoxItem:selected Button.row-action">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="Button.tool">
+      <Setter Property="Padding" Value="10,3" />
+      <Setter Property="FontSize" Value="12" />
+    </Style>
+    <Style Selector="Border.stat">
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />
+      <Setter Property="BorderThickness" Value="0,1,0,0" />
+      <Setter Property="Padding" Value="12,4" />
+    </Style>
+  </Window.Styles>
+
+  <DockPanel>
+
+    <!-- 工具栏 40px -->
+    <Border DockPanel.Dock="Top"
+            Height="40"
+            Padding="8,0"
+            BorderThickness="0,0,0,1"
+            BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+          <Button x:Name="NewButton"
+                  Classes="accent tool"
+                  Content="＋ 新建"
+                  Click="OnNewDownloadClick" />
+          <Button Classes="tool" Content="恢复" Command="{Binding ResumeSelectedCommand}" />
+          <Button Classes="tool" Content="暂停" Command="{Binding PauseSelectedCommand}" />
+          <Button Classes="tool" Content="删除" Command="{Binding DeleteSelectedCommand}" />
+        </StackPanel>
+
+        <TextBox x:Name="SearchBox"
+                 Grid.Column="1"
+                 Width="260"
+                 FontSize="12"
+                 PlaceholderText="搜索文件名或链接"
+                 VerticalAlignment="Center"
+                 HorizontalAlignment="Center"
+                 Text="{Binding SearchText}" />
+
+        <Button Grid.Column="2"
+                x:Name="SettingsButton"
+                Classes="tool"
+                Content="⚙ 设置"
+                VerticalAlignment="Center"
+                Click="OnSettingsClick" />
+      </Grid>
+    </Border>
+
+    <!-- 状态栏 24px -->
+    <Border DockPanel.Dock="Bottom" Classes="stat">
+      <Grid ColumnDefinitions="Auto,*,Auto">
+        <TextBlock Text="{Binding StatusSummary}" FontSize="12" VerticalAlignment="Center" />
+        <TextBlock Grid.Column="1"
+                   Text="{Binding ListSummary}"
+                   FontSize="12"
+                   Opacity="0.6"
+                   Margin="16,0,0,0"
+                   VerticalAlignment="Center" />
+        <TextBlock Grid.Column="2"
+                   x:Name="StatusText"
+                   Text="{Binding DbPath, StringFormat='任务库：{0}'}"
+                   FontSize="12"
+                   Opacity="0.7"
+                   TextTrimming="CharacterEllipsis"
+                   VerticalAlignment="Center" />
+      </Grid>
+    </Border>
+
+    <!-- 左侧分类 180px -->
+    <Border DockPanel.Dock="Left"
+            Width="180"
+            Padding="0,8"
+            BorderThickness="0,0,1,0"
+            BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
+      <ListBox x:Name="CategoryList"
+               ItemsSource="{Binding Categories}"
+               SelectedItem="{Binding SelectedCategory}"
+               Background="Transparent"
+               BorderThickness="0">
+        <ListBox.ItemTemplate>
+          <DataTemplate x:DataType="vm:CategoryViewModel">
+            <Grid ColumnDefinitions="*,Auto" Margin="8,7">
+              <TextBlock Text="{Binding Name}" FontSize="13" />
+              <TextBlock Grid.Column="1"
+                         Text="{Binding Count}"
+                         FontSize="12"
+                         Opacity="0.55"
+                         VerticalAlignment="Center" />
+            </Grid>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </Border>
+
+    <!-- 主列表 -->
+    <Grid>
+      <ListBox x:Name="TaskList"
+               ItemsSource="{Binding Rows}"
+               SelectedItem="{Binding SelectedRow}"
+               Background="Transparent"
+               BorderThickness="0"
+               ScrollViewer.IsDeferredScrollingEnabled="False">
+        <ListBox.ItemsPanel>
+          <ItemsPanelTemplate>
+            <VirtualizingStackPanel />
+          </ItemsPanelTemplate>
+        </ListBox.ItemsPanel>
+        <ListBox.ItemTemplate>
+          <DataTemplate>
+            <controls:DownloadRow />
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+
+      <TextBlock Text="暂无下载任务"
+                 FontSize="13"
+                 Opacity="0.45"
+                 HorizontalAlignment="Center"
+                 VerticalAlignment="Center"
+                 IsVisible="{Binding IsEmpty}" />
+    </Grid>
+
+  </DockPanel>
+
+</Window>

@@ -1,0 +1,129 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Xdm.Ui.ViewModels"
+        x:Class="Xdm.Ui.Views.SettingsWindow"
+        x:DataType="vm:SettingsViewModel"
+        Title="设置"
+        Width="620" Height="540"
+        MinWidth="540" MinHeight="460"
+        WindowStartupLocation="CenterOwner">
+
+  <DockPanel Margin="16">
+
+    <StackPanel DockPanel.Dock="Bottom" Spacing="8" Margin="0,12,0,0">
+      <TextBlock Text="{Binding ErrorText}"
+                 IsVisible="{Binding HasError}"
+                 Foreground="#D9534F" FontSize="12" TextWrapping="Wrap" />
+      <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+        <TextBlock Text="限速/并发立即生效；代理与重试参数下次启动生效。"
+                   FontSize="11" Opacity="0.55" VerticalAlignment="Center" Margin="0,0,12,0" />
+        <Button Content="保存" MinWidth="80" Click="OnSaveClick" Classes="accent" />
+        <Button Content="关闭" MinWidth="80" Click="OnCloseClick" />
+      </StackPanel>
+    </StackPanel>
+
+    <TabControl>
+      <TabItem Header="常规">
+        <StackPanel Spacing="14" Margin="12">
+          <StackPanel Spacing="4">
+            <TextBlock Text="界面语言" FontSize="12" />
+            <ComboBox SelectedIndex="0" Width="180" HorizontalAlignment="Left" IsEnabled="False">
+              <ComboBoxItem Content="简体中文" />
+              <ComboBoxItem Content="English" />
+            </ComboBox>
+          </StackPanel>
+          <StackPanel Spacing="4">
+            <TextBlock Text="主题" FontSize="12" />
+            <ComboBox SelectedIndex="0" Width="180" HorizontalAlignment="Left" IsEnabled="False">
+              <ComboBoxItem Content="跟随系统" />
+              <ComboBoxItem Content="浅色" />
+              <ComboBoxItem Content="深色" />
+            </ComboBox>
+          </StackPanel>
+          <CheckBox Content="下载完成后提醒" IsChecked="{Binding NotifyOnComplete}" FontSize="12" />
+          <StackPanel Spacing="4">
+            <TextBlock Text="任务库" FontSize="12" />
+            <SelectableTextBlock Text="{Binding DbPath}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" />
+          </StackPanel>
+          <StackPanel Spacing="4">
+            <TextBlock Text="设置文件" FontSize="12" />
+            <SelectableTextBlock Text="{Binding SettingsPath}" FontSize="11" Opacity="0.7" TextWrapping="Wrap" />
+          </StackPanel>
+        </StackPanel>
+      </TabItem>
+
+      <TabItem Header="连接">
+        <StackPanel Spacing="14" Margin="12">
+          <StackPanel Spacing="4">
+            <TextBlock Text="新任务默认分段数" FontSize="12" />
+            <NumericUpDown Minimum="1" Maximum="256" Increment="1" FormatString="0"
+                           Value="{Binding MaxSegments}" Width="150" HorizontalAlignment="Left" />
+          </StackPanel>
+          <StackPanel Spacing="4">
+            <TextBlock Text="同时下载任务数" FontSize="12" />
+            <NumericUpDown Minimum="1" Maximum="32" Increment="1" FormatString="0"
+                           Value="{Binding MaxConcurrent}" Width="150" HorizontalAlignment="Left" />
+          </StackPanel>
+          <StackPanel Spacing="4">
+            <CheckBox Content="启用全局限速" IsChecked="{Binding SpeedLimitEnabled}" FontSize="12" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <NumericUpDown Minimum="1" Maximum="1048576" Increment="64" FormatString="0"
+                             Value="{Binding SpeedLimitKbps}" Width="170"
+                             IsEnabled="{Binding SpeedLimitEnabled}" />
+              <TextBlock Text="KB/s（所有任务合计）" FontSize="12" VerticalAlignment="Center" Opacity="0.7" />
+            </StackPanel>
+          </StackPanel>
+          <StackPanel Spacing="4">
+            <TextBlock Text="失败重试次数" FontSize="12" />
+            <NumericUpDown Minimum="0" Maximum="10" Increment="1" FormatString="0"
+                           Value="{Binding MaxRetries}" Width="150" HorizontalAlignment="Left" />
+          </StackPanel>
+          <StackPanel Spacing="4">
+            <TextBlock Text="重试退避基数（毫秒）" FontSize="12" />
+            <NumericUpDown Minimum="50" Maximum="5000" Increment="50" FormatString="0"
+                           Value="{Binding RetryBaseDelayMs}" Width="150" HorizontalAlignment="Left" />
+          </StackPanel>
+        </StackPanel>
+      </TabItem>
+
+      <TabItem Header="目录">
+        <StackPanel Spacing="12" Margin="12">
+          <TextBlock Text="新建任务的默认保存目录" FontSize="12" />
+          <DockPanel>
+            <Button DockPanel.Dock="Right" Content="浏览…" Margin="8,0,0,0" Click="OnBrowseClick" />
+            <TextBox Text="{Binding DefaultSaveFolder}" />
+          </DockPanel>
+          <TextBlock Text="任务库位置由启动参数 --db 决定，界面只读显示。"
+                     FontSize="11" Opacity="0.55" TextWrapping="Wrap" />
+        </StackPanel>
+      </TabItem>
+
+      <TabItem Header="网络">
+        <StackPanel Spacing="12" Margin="12">
+          <StackPanel Spacing="4">
+            <TextBlock Text="代理" FontSize="12" />
+            <ComboBox SelectedIndex="{Binding ProxyModeIndex}" Width="200" HorizontalAlignment="Left">
+              <ComboBoxItem Content="使用系统代理" />
+              <ComboBoxItem Content="直连" />
+              <ComboBoxItem Content="自定义" />
+            </ComboBox>
+          </StackPanel>
+          <StackPanel Spacing="4" IsVisible="{Binding IsCustomProxy}">
+            <TextBlock Text="代理地址" FontSize="12" />
+            <TextBox Text="{Binding ProxyUrl}" PlaceholderText="http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" />
+          </StackPanel>
+          <StackPanel Spacing="4">
+            <TextBlock Text="默认请求头（每行一条「名称: 值」）" FontSize="12" />
+            <TextBox Text="{Binding DefaultHeadersText}" AcceptsReturn="True" TextWrapping="Wrap"
+                     Height="110" FontFamily="Consolas"
+                     PlaceholderText="Referer: https://example.com&#10;User-Agent: Mozilla/5.0 ..." />
+          </StackPanel>
+          <TextBlock Text="代理与请求头变更保存后，对之后新建的任务生效；代理需重启应用。"
+                     FontSize="11" Opacity="0.55" TextWrapping="Wrap" />
+        </StackPanel>
+      </TabItem>
+    </TabControl>
+
+  </DockPanel>
+
+</Window>

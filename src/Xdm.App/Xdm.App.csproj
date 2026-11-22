@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>Xdm.App</RootNamespace>
+    <AssemblyName>xdm-app</AssemblyName>
+    <!-- 本工程是唯一的启动栈所在：AIO = Avalonia 核心 + SimdSkia 合并包（ARCHITECTURE.md §2.1） -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Sevencat.Avalonia.SimdAIO" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Xdm.Ui\Xdm.Ui.csproj" />
+    <ProjectReference Include="..\Xdm.Core\Xdm.Core.csproj" />
+  </ItemGroup>
+
+</Project>

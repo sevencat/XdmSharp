@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Xdm.Ui</RootNamespace>
+    <!-- 视图层不引任何启动栈 / 渲染包：换后端时本工程零改动（ARCHITECTURE.md §2.2） -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Xdm.Core\Xdm.Core.csproj" />
+  </ItemGroup>
+
+</Project>

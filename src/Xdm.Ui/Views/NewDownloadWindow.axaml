@@ -1,0 +1,75 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:Xdm.Ui.ViewModels"
+        x:Class="Xdm.Ui.Views.NewDownloadWindow"
+        x:DataType="vm:NewDownloadViewModel"
+        Title="新建下载"
+        Width="580" Height="470"
+        MinWidth="480" MinHeight="380"
+        WindowStartupLocation="CenterOwner">
+
+  <DockPanel Margin="16">
+
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" Margin="0,12,0,0">
+      <TextBlock Text="{Binding ErrorText}"
+                 Foreground="{DynamicResource ErrorBrush}"
+                 FontSize="12"
+                 VerticalAlignment="Center"
+                 Margin="0,0,12,0"
+                 IsVisible="{Binding HasError}" />
+      <Button Content="取消" MinWidth="80" Click="OnCancelClick" />
+      <Button Content="添加" MinWidth="80" Classes="accent" Click="OnAddClick" />
+    </StackPanel>
+
+    <TabControl>
+      <TabItem Header="链接">
+        <Grid RowDefinitions="Auto,8,Auto,8,Auto,8,Auto,8,Auto,8,Auto"
+              ColumnDefinitions="90,*"
+              Margin="8,12">
+
+          <TextBlock Grid.Row="0" Grid.Column="0" Text="链接" FontSize="12" VerticalAlignment="Top" Margin="0,6,0,0" />
+          <TextBox Grid.Row="0" Grid.Column="1"
+                   x:Name="UrlBox"
+                   Text="{Binding Urls}"
+                   AcceptsReturn="True"
+                   Height="110"
+                   FontSize="12"
+                   TextWrapping="Wrap"
+                   PlaceholderText="每行一个 http/https 链接" />
+
+          <TextBlock Grid.Row="2" Grid.Column="0" Text="保存到" FontSize="12" VerticalAlignment="Center" />
+          <Grid Grid.Row="2" Grid.Column="1" ColumnDefinitions="*,Auto">
+            <TextBox Text="{Binding SaveFolder}" FontSize="12" />
+            <Button Grid.Column="1" Content="浏览…" Margin="8,0,0,0" Click="OnBrowseClick" />
+          </Grid>
+
+          <TextBlock Grid.Row="4" Grid.Column="0" Text="文件名" FontSize="12" VerticalAlignment="Center" />
+          <TextBox Grid.Row="4" Grid.Column="1"
+                   Text="{Binding FileName}"
+                   FontSize="12"
+                   PlaceholderText="留空则按链接自动推导（仅单链接生效）" />
+
+          <TextBlock Grid.Row="6" Grid.Column="0" Text="分段数" FontSize="12" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Row="6" Grid.Column="1"
+                         Width="140" HorizontalAlignment="Left"
+                         Minimum="1" Maximum="256" Increment="1"
+                         FormatString="0"
+                         Value="{Binding Segments}" />
+
+          <CheckBox Grid.Row="8" Grid.Column="1"
+                    Content="立即开始"
+                    FontSize="12"
+                    IsChecked="{Binding StartImmediately}" />
+
+          <TextBlock Grid.Row="10" Grid.Column="1"
+                     Text="M1 仅「链接」页；HuggingFace / 种子页在 V2 / V3 追加，底部按钮区共用。"
+                     FontSize="11"
+                     Opacity="0.5"
+                     TextWrapping="Wrap" />
+        </Grid>
+      </TabItem>
+    </TabControl>
+
+  </DockPanel>
+
+</Window>
