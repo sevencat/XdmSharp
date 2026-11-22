@@ -4,7 +4,7 @@
 
 # XdmSharp
 
-Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传），C# + MewUI（Win32 + Direct2D）+ .NET 10。
+Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传），C# + MewUI（Win32 + Direct2D）+ .NET 11。
 
 ## 特性
 
@@ -15,6 +15,8 @@ Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传）�
 - **HuggingFace 模型下载**：输入 `owner/name` → 拉仓库文件清单 → 勾选入队；一个模型包在列表里只占一行
   （进度/速度/状态按文件汇总），点行首三角可原地展开看每个文件，子目录原样保留，LFS 文件下发前校验 sha256
 - **包内并发限制**：一个多文件任务同时只跑 N 个文件（默认 3），大模型包不会长期占满任务槽位
+- **HF 独立代理**：设置里可给 HuggingFace 单配一条代理（搜索 / 文件清单 / 模型包下载都走它），
+  与普通下载的默认代理互不影响；不配则跟随默认代理
 - **默认目录**：走 `SHGetKnownFolderPath(FOLDERID_Downloads)`，用户把「下载」搬到别的盘也跟着走
 - **原生单文件**：可发布 NativeAOT 档（`build.ps1 -Aot`），15 MB 单 exe，目标机零依赖
 
@@ -63,7 +65,7 @@ code-first，没有 XAML 与资源字典），Windows 平台层 + Direct2D 后�
 
 | 项 | 版本 | 首期 | 说明 |
 |---|---|---|---|
-| .NET | `net10.0` | ✔ | TFM 不写 `-windows`；`RuntimeIdentifier` 只在 `dotnet publish -r win-x64` 时给 |
+| .NET | `net11.0` | ✔ | TFM 不写 `-windows`；`RuntimeIdentifier` 只在 `dotnet publish -r win-x64` 时给 |
 | Aprillz.MewUI | `0.22.1` | ✔ | 视图 + 平台 + Direct2D 后端；0.x 次版本间可能破坏性变更，锁死版本升级当独立任务 |
 | xunit.v3 | `3.2.2` | ✔ | 测试（含视图层测试） |
 | PureDb | `1.0.0-rc.1` | ✔ | 任务库（纯托管嵌入式，无原生依赖；仅 net10.0） |
@@ -198,14 +200,14 @@ dotnet run --project src/Xdm.App.Mew -- https://example.com/a.bin   # 直接弹�
 $env:XDM_DEMO=1000; dotnet run --project src/Xdm.App.Mew   # 1000 条假数据，复验列表虚拟化
 # 同一任务库只允许一个进程：已有实例在跑时，第二个进程把链接交给它后自己退出（退出码 0）
 # 键按库路径哈希计算，所以不同 --db 的两个实例可以并存（多配置并行下载）
-dotnet test                                   # 全部测试（329 条：Core 235 + Ui.Mew 94）
+dotnet test                                   # 全部测试（353 条：Core 250 + Ui.Mew 103）
 dotnet test tests/Xdm.Ui.Mew.Tests            # 视图层测试（结构/命令桥/对话框/布局）
 pwsh tools/make-icons.ps1                     # 改了 logo.png 后重生成 xdm-logo.png / xdm.ico
 .\build.ps1 -Configuration Release -Test -Publish   # ①构建 ②测试 ③发布 win-x64
 .\build.ps1 -Configuration Release -Aot             # NativeAOT 发布到 publish\win-x64-aot
 
 # 普通发布：publish\win-x64\xdm.exe（目录 + 托管 dll，约 4MB，framework-dependent）
-# 目标机需 .NET 10 运行时；是否改 self-contained 见 docs/PROGRESS.md 待决事项
+# 目标机需 .NET 11 运行时；是否改 self-contained 见 docs/PROGRESS.md 待决事项
 # AOT 发布：publish\win-x64-aot\xdm.exe（单个原生 exe，约 15MB，目标机不需要运行时）
 #   - 需要 MSVC 链接器 + Windows SDK（VS「使用 C++ 的桌面开发」）
 #   - 目录里只有 exe；原生符号 xdm.pdb（~118MB）默认删除，排障加 -KeepAotSymbols

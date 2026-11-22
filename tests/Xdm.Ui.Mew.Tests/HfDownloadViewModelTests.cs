@@ -149,6 +149,72 @@ public sealed class HfDownloadViewModelTests : IDisposable
         Assert.Equal("config.json", requests[0].FileName);
     }
 
+    // ── 搜索 ──────────────────────────────────────────────────────────────
+
+    private const string SearchJson = """
+        [
+          { "id": "meta-llama/Llama-3.1-8B", "downloads": 1200000, "likes": 4321,
+            "pipeline_tag": "text-generation" }
+        ]
+        """;
+
+    private static HfDownloadViewModel NewSearchViewModel() =>
+        new("https://hf.test", null, new HfHubClient(new HttpClient(new StubHandler(SearchJson))));
+
+    [Fact]
+    public void Search_FillsResultsAndStatus()
+    {
+        using var viewModel = NewSearchViewModel();
+        viewModel.Repo = "llama";
+
+        Assert.True(viewModel.Search(TestContext.Current.CancellationToken));
+
+        Assert.True(viewModel.HasSearchResults);
+        var model = Assert.Single(viewModel.SearchResults);
+        Assert.Equal("meta-llama/Llama-3.1-8B", model.Id);
+        Assert.Equal(1200000, model.Downloads);
+        Assert.Equal("text-generation", model.PipelineTag);
+        Assert.Contains("找到 1 个模型", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.False(viewModel.IsBusy);
+    }
+
+    [Fact]
+    public void Search_EmptyKeyword_WritesHintWithoutCallingHub()
+    {
+        using var viewModel = NewSearchViewModel();
+        viewModel.Repo = "   ";
+
+        Assert.False(viewModel.Search(TestContext.Current.CancellationToken));
+
+        Assert.Contains("关键字", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.False(viewModel.HasSearchResults);
+    }
+
+    [Fact]
+    public void Search_NothingFound_WritesHint()
+    {
+        using var viewModel = new HfDownloadViewModel(
+            "https://hf.test", null, new HfHubClient(new HttpClient(new StubHandler("[]"))));
+        viewModel.Repo = "zzz";
+
+        Assert.False(viewModel.Search(TestContext.Current.CancellationToken));
+
+        Assert.Contains("没有找到", viewModel.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SelectModel_FillsRepoAndClearsResults()
+    {
+        using var viewModel = NewSearchViewModel();
+        viewModel.Repo = "llama";
+        Assert.True(viewModel.Search(TestContext.Current.CancellationToken));
+
+        viewModel.SelectModel(viewModel.SearchResults[0]);
+
+        Assert.Equal("meta-llama/Llama-3.1-8B", viewModel.Repo);
+        Assert.False(viewModel.HasSearchResults);
+    }
+
     private sealed class StubHandler(string json) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(

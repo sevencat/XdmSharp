@@ -12,7 +12,7 @@ public sealed class SettingsViewModel : ViewModelBase
     /// <summary>限速输入上限（1 GB/s）。</summary>
     public const decimal MaxSpeedKbps = 1024m * 1024m;
 
-    /// <summary>默认代理下拉/单选里的固定项数：系统代理、直连。</summary>
+    /// <summary>默认代理 / HuggingFace 代理单选里的固定项数：系统代理（或「跟随默认」）、直连。</summary>
     public const int FixedProxyOptions = 2;
 
     private readonly AppSettings _source;
@@ -24,6 +24,7 @@ public sealed class SettingsViewModel : ViewModelBase
     private bool _speedLimitEnabled;
     private decimal _speedLimitKbps;
     private int _defaultProxyIndex;
+    private int _hfProxyIndex;
     private string _defaultSaveFolder;
     private bool _notifyOnComplete;
     private decimal _maxRetries;
@@ -48,6 +49,7 @@ public sealed class SettingsViewModel : ViewModelBase
             : 512m;
         Proxies = [.. settings.Proxies.Select(static p => new ProxyEditRow { Id = p.Id, Name = p.Name, Url = p.Url })];
         _defaultProxyIndex = DefaultProxyIndexOf(settings, Proxies);
+        _hfProxyIndex = HuggingFaceProxyIndexOf(settings, Proxies);
         _defaultSaveFolder = settings.DefaultSaveFolder ?? DefaultDownloadsFolder();
         _notifyOnComplete = settings.NotifyOnComplete;
         _maxRetries = settings.MaxRetries;
@@ -117,6 +119,16 @@ public sealed class SettingsViewModel : ViewModelBase
     {
         get => _defaultProxyIndex;
         set => SetProperty(ref _defaultProxyIndex, value);
+    }
+
+    /// <summary>
+    /// HuggingFace 代理选项下标：0 = 跟随默认代理，1 = 直连，2 + i = <see cref="Proxies"/> 第 i 条
+    /// （与设置页单选按钮顺序一致）。
+    /// </summary>
+    public int HuggingFaceProxyIndex
+    {
+        get => _hfProxyIndex;
+        set => SetProperty(ref _hfProxyIndex, value);
     }
 
     /// <summary>新建任务的默认保存目录。</summary>
@@ -190,7 +202,7 @@ public sealed class SettingsViewModel : ViewModelBase
     {
         settings = _source.Clone();
 
-        if (!TryBuildProxies(out var proxies, out var defaultProxyId, out var proxyError))
+        if (!TryBuildProxies(out var proxies, out var defaultProxyId, out var hfProxyId, out var proxyError))
         {
             ErrorText = proxyError;
             return false;
@@ -218,6 +230,7 @@ public sealed class SettingsViewModel : ViewModelBase
             : 0;
         settings.Proxies = proxies;
         settings.DefaultProxyId = defaultProxyId;
+        settings.HuggingFaceProxyId = hfProxyId;
 
         // 旧版单代理字段已经由 Proxies 取代，保存时清空避免再次迁移。
         settings.ProxyMode = ProxyMode.System;
@@ -239,14 +252,16 @@ public sealed class SettingsViewModel : ViewModelBase
         return true;
     }
 
-    /// <summary>把编辑行折成代理表 + 默认代理 id；空行忽略，地址非法直接报错。</summary>
+    /// <summary>把编辑行折成代理表 + 默认代理 / HF 代理 id；空行忽略，地址非法直接报错。</summary>
     private bool TryBuildProxies(
         out List<ProxyProfile> proxies,
         out string? defaultProxyId,
+        out string? huggingFaceProxyId,
         out string error)
     {
         proxies = [];
         defaultProxyId = null;
+        huggingFaceProxyId = null;
         error = string.Empty;
 
         // 记录「原行号 → 落库代理」，默认代理单选按原行号选中的才有意义。
@@ -289,6 +304,14 @@ public sealed class SettingsViewModel : ViewModelBase
             _ => kept.FirstOrDefault(k => k.RowIndex == DefaultProxyIndex - FixedProxyOptions).Profile?.Id,
         };
 
+        // HF 代理多一个「跟随默认」的 0 号项，直连还是 1 号，具名代理从 2 号起。
+        huggingFaceProxyId = HuggingFaceProxyIndex switch
+        {
+            <= 0 => null,
+            1 => ProxyIds.Direct,
+            _ => kept.FirstOrDefault(k => k.RowIndex == HuggingFaceProxyIndex - FixedProxyOptions).Profile?.Id,
+        };
+
         return true;
     }
 
@@ -305,6 +328,23 @@ public sealed class SettingsViewModel : ViewModelBase
         }
 
         var index = rows.FindIndex(r => string.Equals(r.Id, settings.DefaultProxyId, StringComparison.Ordinal));
+        return index < 0 ? 0 : index + FixedProxyOptions;
+    }
+
+    private static int HuggingFaceProxyIndexOf(AppSettings settings, List<ProxyEditRow> rows)
+    {
+        if (string.Equals(settings.HuggingFaceProxyId, ProxyIds.Direct, StringComparison.Ordinal))
+        {
+            return 1;
+        }
+
+        // null / 空 = 跟随默认代理（0 号项），也覆盖「引用的代理被删了」的情况。
+        if (string.IsNullOrWhiteSpace(settings.HuggingFaceProxyId))
+        {
+            return 0;
+        }
+
+        var index = rows.FindIndex(r => string.Equals(r.Id, settings.HuggingFaceProxyId, StringComparison.Ordinal));
         return index < 0 ? 0 : index + FixedProxyOptions;
     }
 

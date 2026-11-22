@@ -2,7 +2,7 @@
 
 命名空间根：`Xdm`。工程/程序集：`Xdm.Core`、`Xdm.Ui.Shared`、`Xdm.Ui.Mew`、`Xdm.App.Mew`、
 `Xdm.Core.Tests`、`Xdm.Ui.Mew.Tests`。
-目标框架：`net10.0`（不写 `-windows`）。
+目标框架：`net11.0`（不写 `-windows`）。
 
 > 工程名里的 `.Mew` 指启动栈（MewUI），**产物**统一叫 `xdm.exe`（`AssemblyName` 与工程名解耦）。
 > 2026-11-22 删除了原 Avalonia 前端（`Xdm.App` / `Xdm.Ui` / `Xdm.Ui.Tests`），
@@ -31,15 +31,15 @@ Xdm.App.Mew (WinExe)                    ← 壳：平台/后端注册、组合�
 
 | 工程 | OutputType | TFM | 包引用 |
 |---|---|---|---|
-| `Xdm.Core` | Library | net10.0 | PureDb |
-| `Xdm.Ui.Shared` | Library | net10.0 | →Core |
-| `Xdm.Ui.Mew` | Library | net10.0 | Aprillz.MewUI.Core, →Ui.Shared, →Core |
-| `Xdm.App.Mew` | WinExe（`xdm.exe`） | net10.0 | Aprillz.MewUI.Backend.Direct2D, Aprillz.MewUI.Platform.Win32, →Ui.Mew, →Ui.Shared, →Core |
-| `Xdm.Core.Tests` | Exe（xunit v3） | net10.0 | xunit.v3, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk, →Core |
-| `Xdm.Ui.Mew.Tests` | Exe（xunit v3） | net10.0 | xunit.v3, Aprillz.MewUI.Platform.Win32, Aprillz.MewUI.Backend.Direct2D, →Ui.Mew |
+| `Xdm.Core` | Library | net11.0 | PureDb |
+| `Xdm.Ui.Shared` | Library | net11.0 | →Core |
+| `Xdm.Ui.Mew` | Library | net11.0 | Aprillz.MewUI.Core, →Ui.Shared, →Core |
+| `Xdm.App.Mew` | WinExe（`xdm.exe`） | net11.0 | Aprillz.MewUI.Backend.Direct2D, Aprillz.MewUI.Platform.Win32, →Ui.Mew, →Ui.Shared, →Core |
+| `Xdm.Core.Tests` | Exe（xunit v3） | net11.0 | xunit.v3, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk, →Core |
+| `Xdm.Ui.Mew.Tests` | Exe（xunit v3） | net11.0 | xunit.v3, Aprillz.MewUI.Platform.Win32, Aprillz.MewUI.Backend.Direct2D, →Ui.Mew |
 
 `Directory.Packages.props` 统一版本；`Directory.Build.props` 统一
-`net10.0` / `ImplicitUsings=enable` / `Nullable=enable` / `TreatWarningsAsErrors=true` / `Deterministic=true`。
+`net11.0` / `ImplicitUsings=enable` / `Nullable=enable` / `TreatWarningsAsErrors=true` / `Deterministic=true`。
 
 `RuntimeIdentifier` 不写进 csproj（首期也不需要），只在 `dotnet publish -r win-x64` 时给。
 
@@ -728,6 +728,8 @@ V3：infohash / torrent 路径），首期恒为 NULL。
    → 重新调 `resolve` 拿新 URL 续传，**不消耗重试预算**。
 4. 认证：`Authorization: Bearer <token>`；token 来源顺序：任务级 → 设置 → `HF_TOKEN` 环境变量。
 5. 镜像：`HF_ENDPOINT`（如 `https://hf-mirror.com`），设置页可改；清单与 resolve 都走同一 endpoint。
+   代理：设置里可单配 `HuggingFaceProxyId`（`null` = 跟随 `DefaultProxyId`，`direct` = 直连，其余为具名代理 id），
+   搜索 / 清单 / 模型包下载都按它解析（`ProxyResolver.ResolveHuggingFace`），与普通下载的默认代理解耦。
 6. 并发：**文件级并发（`AppSettings.MaxFilesPerTask`，默认 3）+ 文件内分段并发**，两者共用
    `ConnectionSlots` 全局配额；避免 1000 文件 × 8 段 = 8000 连接的灾难（实现见 §6.2）。
 7. 校验：`size` 一致 → 写入 `content_sha256`；完成后校验（LFS 文件才有 sha256）。
@@ -765,6 +767,11 @@ V3：infohash / torrent 路径），首期恒为 NULL。
    只有 LFS 文件带 sha256，普通小文件跳过（`ContentSha256` 为空）。清单请求与下载请求共用选中的代理：
    对话框每点一次「拉取文件」都按当前代理单选组重建清单客户端。
 7. **未做**：`cache_edit`/权限字段过滤、多连接加速（`PLAN.md` 待决 #6）。
+8. **模型搜索**（2026-11-23）：`HfHubClient.SearchModelsAsync` 打
+   `GET {endpoint}/api/models?search=…&limit=20&sort=downloads&direction=-1`，解析 `id`/`downloads`/`likes`/`pipeline_tag`，
+   只保留两段 `owner/name`；对话框里「搜索」与「拉取文件」共用一个输入框，结果在文件列表同一位置顶替显示，
+   点一条即填入模型 id 并自动拉清单（结果模式下点「添加」会被拦下，避免拿上一个仓库的勾选建任务）。
+   搜索与清单共用同一代理单选与 token。
 
 #### 12.2.2 父任务汇总（2026-11-23，契约 1/2 落地）
 

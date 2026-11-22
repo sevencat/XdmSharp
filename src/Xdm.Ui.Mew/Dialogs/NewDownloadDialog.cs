@@ -37,8 +37,10 @@ public sealed class NewDownloadDialog : Window
     private readonly TextBox _hfRepoBox;
     private readonly TextBox _hfRevisionBox;
     private readonly ListBox _hfList;
+    private readonly ListBox _hfResultsList;
     private readonly TextBlock _hfStatus;
     private readonly Button _fetchButton;
+    private readonly Button _searchButton;
 
     public NewDownloadDialog(
         string? initialUrl = null,
@@ -49,7 +51,8 @@ public sealed class NewDownloadDialog : Window
         string? hfToken = null,
         HfHubClient? hfClient = null,
         ProxyRoute? hfProxy = null,
-        Func<string?, ProxyRoute>? hfProxyResolver = null)
+        Func<string?, ProxyRoute>? hfProxyResolver = null,
+        string? hfProxyId = null)
     {
         _hfProxyResolver = hfProxyResolver;
         Borderless = true;
@@ -90,7 +93,10 @@ public sealed class NewDownloadDialog : Window
         // 代理用单选组：MewUI 0.22 的 ComboBox 在弹层里点不动（PLAN-MEWUI 坑 11）。
         // 传进来的选项由主窗口按设置生成；没有就退化成「默认 + 直连」两项。
         _vm.ProxyChoices = proxies is { Count: > 0 } ? proxies : ProxyChoice.Build(new AppSettings());
-        _vm.SelectedProxyIndex = 0;
+
+        // 设置里给 HF 单配了代理就直接预选中它：HF 搜索 / 拉清单 / 模型包下载都跟着这一项走，
+        // 没配（id 为空）仍是「默认」——与加这个设置项之前完全一致。
+        _vm.SelectedProxyIndex = IndexOfProxyId(_vm.ProxyChoices, hfProxyId);
         _proxyPanel = new WrapPanel().Spacing(12);
         for (var i = 0; i < _vm.ProxyChoices.Count; i++)
         {
@@ -99,7 +105,7 @@ public sealed class NewDownloadDialog : Window
                 .GroupName("new-download-proxy")
                 .Content(_vm.ProxyChoices[i].Label)
                 .FontSize(12)
-                .IsChecked(index == 0);
+                .IsChecked(index == _vm.SelectedProxyIndex);
             radio.OnCheckedChanged(checkedNow =>
             {
                 if (checkedNow == true)
@@ -134,6 +140,13 @@ public sealed class NewDownloadDialog : Window
             .Height(26)
             .OnClick(OnFetchFiles);
 
+        _searchButton = new Button()
+            .Content("搜索")
+            .FontSize(12)
+            .Width(72)
+            .Height(26)
+            .OnClick(OnSearchModels);
+
         _hfStatus = new TextBlock()
             .FontSize(11)
             .Foreground(MewTheme.TextSecondary)
@@ -146,6 +159,22 @@ public sealed class NewDownloadDialog : Window
             .ItemTemplate<HfFile>(build: BuildHfRow, bind: BindHfRow);
         _hfList.SelectionMode = ItemsSelectionMode.Multiple;
         _hfList.HorizontalScroll = ScrollMode.Disabled;
+
+        // 搜索结果与文件清单共用同一块位置，按模式切换显示（两套条目类型，模板不能复用）。
+        _hfResultsList = new ListBox()
+            .ItemHeight(24)
+            .ItemsSource(ItemsView.Create(new List<HfModelSummary>()))
+            .ItemTemplate<HfModelSummary>(build: BuildModelRow, bind: BindModelRow);
+        _hfResultsList.HorizontalScroll = ScrollMode.Disabled;
+        _hfResultsList.IsVisible = false;
+        // 点一条 = 选中模型并立刻拉它的文件清单（搜索的目的就是下载）。
+        _hfResultsList.OnSelectionChanged(item =>
+        {
+            if (item is HfModelSummary model)
+            {
+                OnPickModel(model);
+            }
+        });
 
         _tabs = new TabControl()
             .Height(TabAreaHeight)
@@ -191,7 +220,8 @@ public sealed class NewDownloadDialog : Window
     /// <summary>
     /// 弹出对话框并返回结果（取消返回 <see langword="null"/>）。
     /// <paramref name="saveFolder"/> / <paramref name="segments"/> / <paramref name="proxies"/> 来自设置，
-    /// <paramref name="hfEndpoint"/> / <paramref name="hfToken"/> 给 HuggingFace 页拉清单用。
+    /// <paramref name="hfEndpoint"/> / <paramref name="hfToken"/> 给 HuggingFace 页拉清单用；
+    /// <paramref name="hfProxyId"/> 是设置里的 HuggingFace 专用代理，用来预选下方的代理单选。
     /// </summary>
     public static NewDownloadResult? Show(
         Window owner,
@@ -203,10 +233,11 @@ public sealed class NewDownloadDialog : Window
         string? hfToken = null,
         HfHubClient? hfClient = null,
         ProxyRoute? hfProxy = null,
-        Func<string?, ProxyRoute>? hfProxyResolver = null)
+        Func<string?, ProxyRoute>? hfProxyResolver = null,
+        string? hfProxyId = null)
     {
         var dialog = new NewDownloadDialog(
-            initialUrl, saveFolder, segments, proxies, hfEndpoint, hfToken, hfClient, hfProxy, hfProxyResolver);
+            initialUrl, saveFolder, segments, proxies, hfEndpoint, hfToken, hfClient, hfProxy, hfProxyResolver, hfProxyId);
         dialog.ShowDialog(owner);
         return dialog.Requests is null && dialog.Group is null
             ? null
@@ -271,17 +302,19 @@ public sealed class NewDownloadDialog : Window
             .Padding(16, 12)
             .Children(
                 new Grid()
-                    .Columns("90,*,Auto")
+                    .Columns("90,*,Auto,Auto")
                     .Children(
                         Label("模型 id").Column(0),
                         _hfRepoBox.Column(1),
-                        _fetchButton.Column(2).Margin(8, 0, 0, 0))
+                        _searchButton.Column(2).Margin(8, 0, 0, 0),
+                        _fetchButton.Column(3).Margin(8, 0, 0, 0))
                     .Row(0),
                 new Grid()
                     .Columns("90,*")
                     .Children(Label("版本").Column(0), _hfRevisionBox.Column(1))
                     .Row(2),
-                _hfList.Row(4),
+                // 文件清单与搜索结果叠在同一格，靠 IsVisible 切换。
+                new Grid().Children(_hfList, _hfResultsList).Row(4),
                 new Grid()
                     .Columns("Auto,Auto,*")
                     .Children(
@@ -315,6 +348,39 @@ public sealed class NewDownloadDialog : Window
     {
         ctx.Get<TextBlock>("path").Text = item.Path;
         ctx.Get<TextBlock>("size").Text = item.Size is { } size ? TextFormat.Bytes(size) : "—";
+    }
+
+    // 搜索结果行：模型 id + 下载量 + 任务类型，宽度与文件行一致（对话框定宽）。
+    private static FrameworkElement BuildModelRow(TemplateContext ctx)
+    {
+        var id = new TextBlock().FontSize(12).CenterVertical();
+        var downloads = new TextBlock()
+            .FontSize(11)
+            .Foreground(MewTheme.TextSecondary)
+            .CenterVertical()
+            .Column(1);
+        var tag = new TextBlock()
+            .FontSize(11)
+            .Foreground(MewTheme.TextSecondary)
+            .CenterVertical()
+            .Column(2);
+
+        ctx.Register("id", id);
+        ctx.Register("downloads", downloads);
+        ctx.Register("tag", tag);
+
+        return new Grid()
+            .Width(548)
+            .Columns("*,110,140")
+            .Padding(8, 0)
+            .Children(id, downloads, tag);
+    }
+
+    private static void BindModelRow(FrameworkElement root, HfModelSummary item, int index, TemplateContext ctx)
+    {
+        ctx.Get<TextBlock>("id").Text = item.Id;
+        ctx.Get<TextBlock>("downloads").Text = item.Downloads is { } downloads ? $"{downloads:N0} 次下载" : string.Empty;
+        ctx.Get<TextBlock>("tag").Text = item.PipelineTag ?? string.Empty;
     }
 
     // ── 两页共用的字段 ──────────────────────────────────────────────────────
@@ -377,26 +443,70 @@ public sealed class NewDownloadDialog : Window
     /// <summary>拉清单走后台线程，结果经 Dispatcher 回 UI 线程（不在 UI 层引入 SynchronizationContext）。</summary>
     private void OnFetchFiles()
     {
-        // 用户在代理单选组里换过项：拉清单跟着当前选择走，别用窗口打开时的默认代理。
+        ApplyCurrentProxy();
+        _fetchButton.IsEnabled = false;
+        _hfStatus.Text = "正在拉取文件清单…";
+
+        RunInBackground(
+            () => _hf.LoadFiles(),
+            ApplyHuggingFaceFiles);
+    }
+
+    /// <summary>按关键字搜模型，同样放后台跑；成功后列表切成搜索结果模式。</summary>
+    private void OnSearchModels()
+    {
+        ApplyCurrentProxy();
+        _searchButton.IsEnabled = false;
+        _hfStatus.Text = "正在搜索模型…";
+
+        RunInBackground(
+            () => _hf.Search(),
+            _ => ApplyHuggingFaceSearch());
+    }
+
+    /// <summary>按代理 id 找单选下标：找不到（含 id 为空 = 跟随默认代理）就是 0 号「默认」项。</summary>
+    private static int IndexOfProxyId(IReadOnlyList<ProxyChoice> choices, string? proxyId)
+    {
+        if (string.IsNullOrWhiteSpace(proxyId))
+        {
+            return 0;
+        }
+
+        var id = proxyId.Trim();
+        for (var i = 0; i < choices.Count; i++)
+        {
+            if (string.Equals(choices[i].ProxyId, id, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>用户在代理单选组里换过项：清单/搜索跟着当前选择走，别用窗口打开时的默认代理。</summary>
+    private void ApplyCurrentProxy()
+    {
         if (_hfProxyResolver is not null)
         {
             _hf.TryUseProxy(_hfProxyResolver(_vm.SelectedProxyId));
         }
+    }
 
-        _fetchButton.IsEnabled = false;
-        _hfStatus.Text = "正在拉取文件清单…";
-
+    /// <summary>同步方法丢到线程池，结果经 Dispatcher 回 UI 线程。</summary>
+    private static void RunInBackground(Func<bool> work, Action<bool> apply)
+    {
         var dispatcher = Application.Current?.Dispatcher;
         Task.Run(() =>
         {
-            var ok = _hf.LoadFiles();
+            var ok = work();
             if (dispatcher is null)
             {
-                ApplyHuggingFaceFiles(ok);
+                apply(ok);
             }
             else
             {
-                dispatcher.BeginInvoke(() => ApplyHuggingFaceFiles(ok));
+                dispatcher.BeginInvoke(() => apply(ok));
             }
         });
     }
@@ -410,9 +520,42 @@ public sealed class NewDownloadDialog : Window
             _hfList.SelectAll();
         }
 
+        // 有清单就回到文件模式（搜索点选、直接拉取都走这里）。
+        _hfResultsList.IsVisible = false;
+        _hfList.IsVisible = true;
+
         _hfStatus.Text = _hf.StatusText;
         _fetchButton.IsEnabled = true;
+        _searchButton.IsEnabled = true;
         _errorText.IsVisible = false;
+    }
+
+    /// <summary>把搜索结果刷到列表；有结果就临时顶掉文件清单（再点一条才拉文件）。</summary>
+    private void ApplyHuggingFaceSearch()
+    {
+        _hfResultsList.ItemsSource(ItemsView.Create(_hf.SearchResults.ToList()));
+
+        var hasResults = _hf.HasSearchResults;
+        _hfResultsList.IsVisible = hasResults;
+        _hfList.IsVisible = !hasResults;
+
+        _hfStatus.Text = _hf.StatusText;
+        _fetchButton.IsEnabled = true;
+        _searchButton.IsEnabled = true;
+        _errorText.IsVisible = false;
+    }
+
+    /// <summary>点中一条搜索结果：填模型 id，立刻拉它的文件清单。</summary>
+    private void OnPickModel(HfModelSummary model)
+    {
+        _hf.SelectModel(model);
+        _hfRepoBox.Text = _hf.Repo;
+
+        _hfResultsList.IsVisible = false;
+        _hfList.IsVisible = true;
+        _hfResultsList.ItemsSource(ItemsView.Create(new List<HfModelSummary>()));
+
+        OnFetchFiles();
     }
 
     private void OnAdd()
@@ -449,6 +592,13 @@ public sealed class NewDownloadDialog : Window
 
     private bool SubmitHuggingFace()
     {
+        // 搜索结果模式下文件清单还是上一个仓库的，别让用户误建任务。
+        if (_hfResultsList.IsVisible)
+        {
+            ShowError("先点一条搜索结果，拉取该模型的文件清单");
+            return false;
+        }
+
         // 保存目录是 HF 页要用的（目标 = 保存目录/owner/name），先兜住再谈勾选。
         if (!Directory.Exists(_vm.SaveFolder))
         {
@@ -493,6 +643,19 @@ public sealed class NewDownloadDialog : Window
 
     /// <summary>测试缝：按 ViewModel 当前清单刷新列表（等同后台拉取成功后那一步）。</summary>
     internal void RefreshHuggingFaceFiles() => ApplyHuggingFaceFiles(selectAll: true);
+
+    /// <summary>测试缝：同步跑一次搜索并刷新列表（等同点「搜索」且后台已返回）。</summary>
+    internal void SearchHuggingFace()
+    {
+        _hf.Search();
+        ApplyHuggingFaceSearch();
+    }
+
+    /// <summary>测试缝：搜索结果列表里的行数（切到结果模式才非零）。</summary>
+    internal int SearchResultRows => _hfResultsList.ItemsSource?.Count ?? 0;
+
+    /// <summary>测试缝：当前显示的是搜索结果列表而不是文件清单。</summary>
+    internal bool IsShowingSearchResults => _hfResultsList.IsVisible;
 
     /// <summary>测试缝：把当前清单里的文件全部勾上（等同点「全选」）。</summary>
     internal void SelectAllHuggingFaceFiles() => _hfList.SelectAll();

@@ -28,10 +28,49 @@
 | 6 | V2 HF 是否需要 `hf_transfer` 式多连接加速 | 待 V2 实测 CDN 单连接吞吐后定 | — |
 | 7 | 父子任务的列表呈现（展开 / 独立窗口 / 折叠统计） | 默认只渲染父行（第二行显示「N/M 个文件」）；父行行首三角可原地展开子文件行（2026-11-23 落地），不做独立窗口 | 2026-11-23 |
 | 8 | 任务库位置与文件名 | **`AppContext.BaseDirectory\xdm.db`**（exe 同目录，绿色版）；不可写回退 `%LOCALAPPDATA%\Xdm\`；命令行 `--db <path>` 覆盖（优先级最高） | 2026-11-22 |
-| 9 | 发布形态：framework-dependent 目录（4MB）/ self-contained / NativeAOT（15MB） | 默认 framework-dependent（需 .NET 10）；另提供 AOT 档 `build.ps1 -Aot`（15MB 单 exe、目标机零依赖；构包需 MSVC 链接器 + Windows SDK） | 2026-11-22 |
+| 9 | 发布形态：framework-dependent 目录（4MB）/ self-contained / NativeAOT（15MB） | 默认 framework-dependent（需 .NET 11）；另提供 AOT 档 `build.ps1 -Aot`（15MB 单 exe、目标机零依赖；构包需 MSVC 链接器 + Windows SDK） | 2026-11-23 |
 | 10 | 同时下载/恢复的任务量大时，界面怎么刷 | **待更新项进队列 → `DispatcherTimer` 每 200ms 在 UI 线程批量 flush**；同时把行定位改字典索引、每帧汇总只算一次、结构变化合并（方案见 `ARCHITECTURE.md` §6.1）。当前是 250ms 单条 drain，够用到百级任务 | 2026-11-22（方案定，未实现） |
 
 ## 日志
+
+### 2026-11-23 · HuggingFace 专用代理
+
+- **设置项**：`AppSettings.HuggingFaceProxyId`（结构版本 5 → 6）。`null` = 跟随 `DefaultProxyId`
+  （老设置文件读出来就是 `null`，行为不变）、`direct` = 直连、其余为具名代理 id；
+  `Normalized()` 里丢弃指向已删代理的 id（退回跟随默认），手写成 `system` 也归到「跟随默认」。
+- **解析**：`ProxyResolver.ResolveHuggingFace(settings)`（内部复用 `Resolve`，空 id 自然落到默认代理）。
+- **UI**：设置 → 网络页 HuggingFace 段多一组单选「HuggingFace 代理」（跟随默认 / 直连 / 各条具名代理，
+  与「默认代理」那组同源、增删代理行时一起重建）；新建下载对话框按 `hfProxyId` 预选代理单选，
+  于是 HF 的搜索、拉文件清单、模型包下载（`SubmitHuggingFace` 把选中项写进 `DownloadGroupRequest.ProxyId`）
+  都走这条路线，用户仍可在对话框里临时改。
+- **测试**：Core +7（归一化/克隆/落盘往返 + 三条 `ResolveHuggingFace`），Ui.Mew +3
+  （设置页下标映射、对话框预选并入包）。全量 **353 通过**（Core 250 + Ui.Mew 103）。
+
+### 2026-11-23 · 目标框架升到 net11.0
+
+- **改动**：`Directory.Build.props` 的 `TargetFramework` 由 `net10.0` 改为 `net11.0`；
+  `global.json` 的 SDK 由 `10.0.101`（`latestPatch`）改为 `11.0.100`（`latestFeature`）。
+- **验证**：`dotnet build` 0 警告 0 错误；`dotnet test` 全量 **343 通过**（Core 243 + Ui.Mew 100），
+  测试产物落到 `bin/Debug/net11.0/`。
+- **顺带**：关于窗口版本行改 `.NET 11`；`ARCHITECTURE.md` / `PLAN.md` / `TESTING.md` / `README.md`
+  的 TFM 与运行时说明同步，README 测试条数由 329 更正为 343。
+- **未做**：`.NET 11` 的 NativeAOT 发布档（`build.ps1 -Aot`）未跑；
+  `publish/` 下的旧 `net10.0` 产物未重新生成。
+
+### 2026-11-23 · HF 新建下载加模型搜索
+
+- **问题**：HF 页只认完整的 `owner/name`，用户得先知道准确 id（还得去网页上抄），拼错一点就 404。
+- **做法**：
+  - `HfHubClient.SearchModelsAsync` 打 `GET {endpoint}/api/models?search=…&limit=20&sort=downloads&direction=-1`，
+    解析 `id`/`downloads`/`likes`/`pipeline_tag`（新记录 `HfModelSummary`），只留两段 `owner/name`；
+    关键字与站点交给 `HfHubClient.SearchUrl`（站点缺省回落官方，`limit` 夹到 [1,100]）。
+  - `HfDownloadViewModel.Search()` 拿输入框内容当关键字（同步，界面放后台线程），命中列表进 `SearchResults`；
+    `SelectModel()` 把 id 填回 `Repo` 并清空结果。
+  - 对话框 HF 页加「搜索」按钮：结果列表与文件列表叠在同一格按模式切换（两套条目类型，模板不能复用），
+    点一条结果 = 填 id + 立即拉清单；结果模式下点「添加」会被拦下（文件清单还是上一个仓库的）。
+- **测试**：Core +6（URL 拼装/解析/过滤非 repo id/token/空关键字不发请求/非 JSON），
+  Ui.Mew +6（ViewModel 搜索与选中、对话框搜索结果列表与拦截）。
+- **未做**：结果分页（只取 20 条）、按 author/tag 过滤。
 
 ### 2026-11-23 · 列表原地展开子文件行
 

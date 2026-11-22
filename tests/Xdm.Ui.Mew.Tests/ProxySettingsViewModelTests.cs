@@ -103,6 +103,51 @@ public sealed class ProxySettingsViewModelTests
     }
 
     [Fact]
+    public void HuggingFaceProxyIndex_ReflectsExistingValue()
+    {
+        var settings = new AppSettings
+        {
+            DefaultSaveFolder = Path.GetTempPath(),
+            Proxies =
+            [
+                new ProxyProfile { Id = "a", Url = "http://127.0.0.1:7890" },
+                new ProxyProfile { Id = "b", Url = "http://127.0.0.1:7891" },
+            ],
+            DefaultProxyId = "a",
+            HuggingFaceProxyId = "b",
+        };
+
+        // 0 跟随默认、1 直连、2 第一条、3 第二条。
+        Assert.Equal(3, NewViewModel(settings).HuggingFaceProxyIndex);
+
+        settings.HuggingFaceProxyId = ProxyIds.Direct;
+        Assert.Equal(1, NewViewModel(settings).HuggingFaceProxyIndex);
+
+        settings.HuggingFaceProxyId = null;
+        Assert.Equal(0, NewViewModel(settings).HuggingFaceProxyIndex);
+    }
+
+    [Fact]
+    public void TryBuild_MapsHuggingFaceProxyIndex()
+    {
+        var vm = NewViewModel();
+        vm.Proxies.Add(new ProxyEditRow { Name = "公司", Url = "http://127.0.0.1:7890" });
+        vm.Proxies.Add(new ProxyEditRow { Name = "HF", Url = "socks5://127.0.0.1:1080" });
+        vm.DefaultProxyIndex = 2;  // 默认 = 公司
+        vm.HuggingFaceProxyIndex = 3;  // HF = 第二条
+
+        Assert.True(vm.TryBuild(out var settings), vm.ErrorText);
+
+        Assert.Equal(settings.Proxies[0].Id, settings.DefaultProxyId);
+        Assert.Equal(settings.Proxies[1].Id, settings.HuggingFaceProxyId);
+
+        // 0 号 = 跟随默认代理（这里就是「公司」），不写死 id。
+        vm.HuggingFaceProxyIndex = 0;
+        Assert.True(vm.TryBuild(out settings), vm.ErrorText);
+        Assert.Null(settings.HuggingFaceProxyId);
+    }
+
+    [Fact]
     public void DefaultProxyIndex_ReflectsExistingDefault()
     {
         var settings = new AppSettings

@@ -82,6 +82,50 @@ public sealed class ProxyResolverTests
     }
 
     [Fact]
+    public void HuggingFace_UsesItsOwnProxy()
+    {
+        var settings = new AppSettings
+        {
+            Proxies =
+            [
+                new ProxyProfile { Id = "corp", Url = "http://127.0.0.1:7890" },
+                new ProxyProfile { Id = "hf", Url = "socks5://127.0.0.1:1080" },
+            ],
+            DefaultProxyId = "corp",
+            HuggingFaceProxyId = "hf",
+        };
+
+        var route = ProxyResolver.ResolveHuggingFace(settings);
+
+        Assert.Equal(ProxyMode.Custom, route.Mode);
+        Assert.Equal("socks5://127.0.0.1:1080", route.Url);
+    }
+
+    [Fact]
+    public void HuggingFace_WithoutOwnProxy_FollowsDefaultProxy()
+    {
+        var settings = Settings("corp", new ProxyProfile { Id = "corp", Url = "http://127.0.0.1:7890" });
+
+        var route = ProxyResolver.ResolveHuggingFace(settings);
+
+        Assert.Equal(ProxyMode.Custom, route.Mode);
+        Assert.Equal("http://127.0.0.1:7890", route.Url);
+    }
+
+    [Fact]
+    public void HuggingFace_DirectIgnoresDefaultProxy()
+    {
+        var settings = new AppSettings
+        {
+            Proxies = [new ProxyProfile { Id = "corp", Url = "http://127.0.0.1:7890" }],
+            DefaultProxyId = "corp",
+            HuggingFaceProxyId = ProxyIds.Direct,
+        };
+
+        Assert.Equal(ProxyMode.Direct, ProxyResolver.ResolveHuggingFace(settings).Mode);
+    }
+
+    [Fact]
     public void RouteKeepsUrlForSocks()
     {
         var settings = Settings(null, new ProxyProfile { Id = "s", Url = "socks5://user:pass@127.0.0.1:1080" });

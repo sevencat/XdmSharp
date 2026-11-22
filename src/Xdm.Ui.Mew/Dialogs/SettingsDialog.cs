@@ -32,8 +32,10 @@ public sealed class SettingsDialog : Window
     private readonly TextBox _saveFolderBox;
     private readonly StackPanel _proxyRowsPanel;
     private readonly WrapPanel _defaultProxyPanel;
+    private readonly WrapPanel _hfProxyPanel;
     private readonly List<ProxyRowControls> _proxyRows = [];
     private readonly List<(int Index, RadioButton Button)> _defaultProxyRadios = [];
+    private readonly List<(int Index, RadioButton Button)> _hfProxyRadios = [];
     private readonly MultiLineTextBox _headersBox;
     private readonly TextBox _hfEndpointBox;
     private readonly TextBox _hfTokenBox;
@@ -77,6 +79,7 @@ public sealed class SettingsDialog : Window
         // 代理用「可增删的行 + 单选默认代理」：MewUI 0.22 的 ComboBox 在自绘弹层里不响应点击（PLAN-MEWUI 坑 11）。
         _proxyRowsPanel = new StackPanel().Spacing(6);
         _defaultProxyPanel = new WrapPanel().Spacing(12);
+        _hfProxyPanel = new WrapPanel().Spacing(12);
 
         var proxyScroll = new ScrollViewer
         {
@@ -161,6 +164,7 @@ public sealed class SettingsDialog : Window
                 Section("默认请求头（每行一条「名称: 值」）", _headersBox),
                 Section("HuggingFace 站点（可填镜像，如 https://hf-mirror.com）", _hfEndpointBox),
                 Section("HuggingFace 令牌（私有/gated 仓库；留空则读环境变量 HF_TOKEN）", _hfTokenBox),
+                Section("HuggingFace 代理（搜索 / 文件清单 / 模型包下载；默认跟随上面的默认代理）", _hfProxyPanel),
                 Text("代理与请求头保存后即时生效：新任务按新代理表解析，已建任务仍走建任务时的路线。")));
 
         _errorText = new TextBlock()
@@ -387,6 +391,68 @@ public sealed class SettingsDialog : Window
         var target = _defaultProxyRadios.FirstOrDefault(r => r.Index == selected).Button
                      ?? _defaultProxyRadios[0].Button;
         target.IsChecked = true;
+
+        // 行号变了 HF 代理单选也得跟着重建，否则用户删掉一条代理后两组选项就对不上了。
+        RebuildHuggingFaceProxyOptions();
+    }
+
+    /// <summary>
+    /// 重建「HuggingFace 代理」单选组：0 跟随默认代理、1 直连、2 + i 第 i 条代理
+    /// （对应 <see cref="SettingsViewModel.HuggingFaceProxyIndex"/>）。
+    /// </summary>
+    private void RebuildHuggingFaceProxyOptions()
+    {
+        var selected = _vm.HuggingFaceProxyIndex;
+        _hfProxyRadios.Clear();
+        _hfProxyPanel.Clear();
+        _hfProxyPanel.Children(HfProxyRadio(0, "跟随默认代理"));
+        _hfProxyPanel.Children(HfProxyRadio(1, "直连"));
+
+        for (var i = 0; i < _proxyRows.Count && i < MaxDefaultProxyOptions; i++)
+        {
+            var row = _proxyRows[i];
+            var label = !string.IsNullOrWhiteSpace(row.NameBox.Text)
+                ? row.NameBox.Text!
+                : !string.IsNullOrWhiteSpace(row.UrlBox.Text)
+                    ? row.UrlBox.Text!
+                    : $"代理 {i + 1}";
+            _hfProxyPanel.Children(HfProxyRadio(i + 2, label));
+        }
+
+        var target = _hfProxyRadios.FirstOrDefault(r => r.Index == selected).Button
+                     ?? _hfProxyRadios[0].Button;
+        target.IsChecked = true;
+    }
+
+    private RadioButton HfProxyRadio(int index, string label)
+    {
+        var radio = new RadioButton()
+            .GroupName("hf-proxy")
+            .Content(label)
+            .FontSize(12);
+        radio.OnCheckedChanged(checkedNow =>
+        {
+            if (checkedNow == true)
+            {
+                _vm.HuggingFaceProxyIndex = index;
+            }
+        });
+
+        _hfProxyRadios.Add((index, radio));
+        return radio;
+    }
+
+    private int SelectedHuggingFaceProxyIndex()
+    {
+        foreach (var (index, button) in _hfProxyRadios)
+        {
+            if (button.IsChecked == true)
+            {
+                return index;
+            }
+        }
+
+        return _vm.HuggingFaceProxyIndex;
     }
 
     private RadioButton DefaultProxyRadio(int index, string label)
@@ -463,6 +529,7 @@ public sealed class SettingsDialog : Window
         }
 
         _vm.DefaultProxyIndex = SelectedDefaultProxyIndex();
+        _vm.HuggingFaceProxyIndex = SelectedHuggingFaceProxyIndex();
         _vm.DefaultHeadersText = _headersBox.Text;
         _vm.HuggingFaceEndpoint = _hfEndpointBox.Text;
         _vm.HuggingFaceToken = _hfTokenBox.Text;

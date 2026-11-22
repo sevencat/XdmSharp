@@ -71,6 +71,37 @@ public sealed class HfHubClient : IDisposable
         return handler;
     }
 
+    /// <summary>
+    /// 按关键字搜模型：<c>GET {endpoint}/api/models?search=…&amp;sort=downloads&amp;direction=-1</c>。
+    /// 关键字就是用户输入（可以是模型 id 片段）；按下载量降序，便于挑官方/热门版本。
+    /// </summary>
+    public async Task<IReadOnlyList<HfModelSummary>> SearchModelsAsync(
+        string? endpoint,
+        string? query,
+        string? token,
+        int limit = 20,
+        CancellationToken cancellationToken = default)
+    {
+        var keyword = (query ?? string.Empty).Trim();
+        if (keyword.Length == 0)
+        {
+            return [];
+        }
+
+        var url = SearchUrl(endpoint, keyword, limit);
+        using var response = await SendAsync(url, token, cancellationToken).ConfigureAwait(false);
+        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        return ParseSearchPage(json);
+    }
+
+    /// <summary>搜索地址（独立出来便于断言查询串）。<paramref name="limit"/> 夹到 [1, 100]。</summary>
+    public static string SearchUrl(string? endpoint, string query, int limit = 20)
+    {
+        var site = string.IsNullOrWhiteSpace(endpoint) ? HfRepo.DefaultEndpoint : endpoint.Trim().TrimEnd('/');
+        var size = Math.Clamp(limit, 1, 100);
+        return $"{site}/api/models?search={Uri.EscapeDataString(query.Trim())}&limit={size}&sort=downloads&direction=-1";
+    }
+
     /// <summary>递归列出仓库文件（目录与符号链接跳过），按路径排序。</summary>
     public async Task<IReadOnlyList<HfFile>> GetFilesAsync(
         HfRepo repo,
@@ -198,6 +229,71 @@ public sealed class HfHubClient : IDisposable
             }
         }
     }
+
+    private static IReadOnlyList<HfModelSummary> ParseSearchPage(string json)
+    {
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(json);
+        }
+        catch (JsonException ex)
+        {
+            throw new HfException("HuggingFace 搜索结果不是合法 JSON（站点可能是镜像或需要登录）", ex);
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Array)
+            {
+                throw new HfException("HuggingFace 搜索结果格式意外（期望 JSON 数组）");
+            }
+
+            var results = new List<HfModelSummary>();
+            foreach (var item in document.RootElement.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                if (!item.TryGetProperty("id", out var idElement) || idElement.GetString() is not { } id)
+                {
+                    continue;
+                }
+
+                // 搜索结果里可能混进组织名、数据集形状的 id：只要标准的两段 owner/name。
+                if (!IsRepoId(id))
+                {
+                    continue;
+                }
+
+                var pipelineTag = item.TryGetProperty("pipeline_tag", out var tagElement)
+                    && tagElement.ValueKind == JsonValueKind.String
+                        ? tagElement.GetString()
+                        : null;
+
+                results.Add(new HfModelSummary
+                {
+                    Id = id,
+                    Downloads = ReadInt64(item, "downloads"),
+                    Likes = ReadInt64(item, "likes"),
+                    PipelineTag = pipelineTag,
+                });
+            }
+
+            return results;
+        }
+    }
+
+    private static long? ReadInt64(JsonElement item, string name) =>
+        item.TryGetProperty(name, out var element) && element.TryGetInt64(out var value) ? value : null;
+
+    private static bool IsRepoId(string id) =>
+        id.Split('/') is { Length: 2 } segments
+        && segments.All(static segment =>
+            segment.Length > 0
+            && segment.IndexOfAny(['\\', '?', '#', ' ', '\t']) < 0);
 
     private static string? NextPageUrl(HttpResponseMessage response, HfRepo repo)
     {

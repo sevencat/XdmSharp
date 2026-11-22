@@ -1,7 +1,7 @@
 # Xdm 总体计划
 
 参考实现：`refcode/xdm-master`（XDM，Kotlin）。本项目目标是 Windows 下的普通 HTTP 下载器，
-C# + MewUI（Win32 + Direct2D）+ .NET 10，命名空间根 `Xdm`。产物 `xdm.exe`。
+C# + MewUI（Win32 + Direct2D）+ .NET 11，命名空间根 `Xdm`。产物 `xdm.exe`。
 
 > 2026-11-22：原 Avalonia 前端已删除，MewUI 成为唯一前端。下方 M0–M5 的历史记录保留原文
 > （带「Avalonia 版」字样），它们记录的是当时的验收事实；现状以 `ARCHITECTURE.md` / `README.md` 为准。

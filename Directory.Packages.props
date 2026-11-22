@@ -1,10 +1,8 @@
 <Project>
-
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
-
   <ItemGroup Label="Avalonia">
     <PackageVersion Include="Avalonia" Version="12.1.6" />
     <PackageVersion Include="Avalonia.Desktop" Version="12.1.6" />
@@ -12,9 +10,9 @@
     <PackageVersion Include="Avalonia.Fonts.Inter" Version="12.1.6" />
     <PackageVersion Include="Avalonia.Headless" Version="12.1.6" />
     <PackageVersion Include="Avalonia.Headless.XUnit" Version="12.1.6" />
+    <PackageVersion Include="MonoTorrent" Version="3.0.2" />
     <PackageVersion Include="Sevencat.Avalonia.SimdAIO" Version="12.1.6.2" />
   </ItemGroup>
-
   <ItemGroup Label="MewUI">
     <!-- 0.x：次版本之间可能有破坏性变更，锁死版本，升级当独立任务做（docs/PLAN-MEWUI.md §6） -->
     <!-- 不引 Aprillz.MewUI.Windows meta 包：它把 Gdi / MewVG 一并拖进产物，
@@ -23,15 +21,12 @@
     <PackageVersion Include="Aprillz.MewUI.Platform.Win32" Version="0.22.1" />
     <PackageVersion Include="Aprillz.MewUI.Backend.Direct2D" Version="0.22.1" />
   </ItemGroup>
-
   <ItemGroup Label="Data">
     <PackageVersion Include="PureDb" Version="1.0.0-rc.1" />
   </ItemGroup>
-
   <ItemGroup Label="Tests">
     <PackageVersion Include="xunit.v3" Version="3.2.2" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.0.1" />
   </ItemGroup>
-
 </Project>

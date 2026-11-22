@@ -215,6 +215,53 @@ public class NewDownloadDialogTests
     }
 
     [Fact]
+    public void HuggingFaceProxy_FromSettings_IsPreselected_And_ReachesGroup()
+    {
+        // 设置里给 HF 单配了 "hf"：打开对话框就该选中它，HF 模型包也按它建任务。
+        var folder = NewTempFolder();
+        var settings = new AppSettings
+        {
+            Proxies =
+            [
+                new ProxyProfile { Id = "corp", Name = "公司代理", Url = "http://127.0.0.1:7890" },
+                new ProxyProfile { Id = "hf", Name = "HF 代理", Url = "socks5://127.0.0.1:1080" },
+            ],
+            DefaultProxyId = "corp",
+            HuggingFaceProxyId = "hf",
+        };
+
+        var client = new HfHubClient(new HttpClient(new FixedJsonHandler("""
+            [
+              { "type": "file", "path": "config.json", "size": 100 }
+            ]
+            """)));
+
+        var dialog = new NewDownloadDialog(
+            null,
+            folder,
+            4,
+            ProxyChoice.Build(settings),
+            "https://hf.test",
+            null,
+            client,
+            hfProxyId: "hf");
+
+        // 选项顺序：默认、直连、公司、HF → HF 是第 4 项。
+        Assert.Equal(3, dialog.ViewModel.SelectedProxyIndex);
+        var radios = VisualTree.Descendants(dialog.Content).OfType<RadioButton>().ToList();
+        Assert.True(radios[3].IsChecked);
+
+        dialog.HuggingFace.Repo = "owner/name";
+        Assert.True(dialog.HuggingFace.LoadFiles(TestContext.Current.CancellationToken));
+        dialog.SelectHuggingFaceTab();
+        dialog.RefreshHuggingFaceFiles();
+
+        Assert.True(dialog.Submit());
+        Assert.Equal("hf", dialog.Group!.ProxyId);
+        Assert.All(dialog.Group!.Files, request => Assert.Equal("hf", request.ProxyId));
+    }
+
+    [Fact]
     public void HuggingFace_Submit_Rejects_Missing_SaveFolder()
     {
         var missing = Path.Combine(Path.GetTempPath(), "xdm-missing-" + Guid.NewGuid().ToString("N"));
@@ -226,6 +273,71 @@ public class NewDownloadDialogTests
 
         Assert.False(dialog.Submit());
         Assert.Null(dialog.Requests);
+    }
+
+    [Fact]
+    public void HuggingFace_Search_ListsModelsInPlaceOfFiles()
+    {
+        var folder = NewTempFolder();
+        var dialog = NewSearchableDialog(folder);
+        dialog.SelectHuggingFaceTab();
+        dialog.HuggingFace.Repo = "llama";
+
+        dialog.SearchHuggingFace();
+
+        Assert.True(dialog.IsShowingSearchResults);
+        Assert.Equal(1, dialog.SearchResultRows);
+        var model = Assert.Single(dialog.HuggingFace.SearchResults);
+        Assert.Equal("meta-llama/Llama-3.1-8B", model.Id);
+        Assert.Contains("找到 1 个模型", dialog.HuggingFace.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HuggingFace_Submit_WhileShowingSearchResults_IsRejected()
+    {
+        var folder = NewTempFolder();
+        var dialog = NewSearchableDialog(folder);
+        dialog.SelectHuggingFaceTab();
+        dialog.HuggingFace.Repo = "llama";
+        dialog.SearchHuggingFace();
+
+        Assert.False(dialog.Submit());
+        Assert.Null(dialog.Group);
+        Assert.True(VisualTree.ContainsText(dialog.Content, "先点一条搜索结果"));
+    }
+
+    private static NewDownloadDialog NewSearchableDialog(string saveFolder)
+    {
+        var client = new HfHubClient(new HttpClient(new SearchAndTreeHandler()));
+
+        return new NewDownloadDialog(
+            null,
+            saveFolder,
+            4,
+            ProxyChoice.Build(new AppSettings()),
+            "https://hf.test",
+            null,
+            client);
+    }
+
+    /// <summary>搜索走 <c>/api/models</c>，拉清单走 <c>/tree/…</c>，两套 JSON 分开给。</summary>
+    private sealed class SearchAndTreeHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            _ = cancellationToken;
+
+            var json = request.RequestUri!.AbsolutePath.EndsWith("/api/models", StringComparison.Ordinal)
+                ? """[{ "id": "meta-llama/Llama-3.1-8B", "downloads": 5, "pipeline_tag": "text-generation" }]"""
+                : """[{ "type": "file", "path": "config.json", "size": 100 }]""";
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json),
+            });
+        }
     }
 
     private static string KindOf(DownloadRequest request)

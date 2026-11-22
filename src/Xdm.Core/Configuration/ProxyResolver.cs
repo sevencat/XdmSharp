@@ -23,6 +23,19 @@ public static class ProxyResolver
         return Resolve(settings.Proxies, id);
     }
 
+    /// <summary>
+    /// HuggingFace 请求（搜索 / 文件清单 / 模型包下载）默认走的路线：先看
+    /// <see cref="AppSettings.HuggingFaceProxyId"/>，没单独配（<c>null</c>）就跟随
+    /// <see cref="AppSettings.DefaultProxyId"/>。
+    /// </summary>
+    public static ProxyRoute ResolveHuggingFace(AppSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+
+        // 传 null 时 Resolve 会退到 DefaultProxyId，正好就是「跟随默认代理」的语义。
+        return Resolve(settings, settings.HuggingFaceProxyId);
+    }
+
     /// <summary>按 id 在给定代理表里查（<c>null</c> 或未知 id 都退回系统代理）。</summary>
     public static ProxyRoute Resolve(IReadOnlyList<ProxyProfile>? proxies, string? proxyId)
     {

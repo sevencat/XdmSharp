@@ -177,6 +177,51 @@ public sealed class AppSettingsTests : IDisposable
     }
 
     [Fact]
+    public void Normalize_KeepsHuggingFaceProxyIdWhenProfileExists()
+    {
+        var settings = new AppSettings
+        {
+            Proxies =
+            [
+                new ProxyProfile { Id = "corp", Url = "http://127.0.0.1:7890" },
+                new ProxyProfile { Id = "socks", Url = "socks5://127.0.0.1:1080" },
+            ],
+            DefaultProxyId = "socks",
+            HuggingFaceProxyId = " corp ",
+        }.Normalized();
+
+        // HF 可以单独走一条，跟普通下载的默认代理不同。
+        Assert.Equal("corp", settings.HuggingFaceProxyId);
+        Assert.Equal("socks", settings.DefaultProxyId);
+    }
+
+    [Fact]
+    public void Normalize_HuggingFaceProxyId_UnknownOrSystemFallsBackToDefault()
+    {
+        var proxies = new[] { new ProxyProfile { Id = "corp", Url = "http://127.0.0.1:7890" } };
+
+        // 老设置文件没有这个字段（null）/ 手改成 system / 指向已删代理：都当「跟随默认代理」。
+        Assert.Null(new AppSettings { Proxies = [.. proxies] }.Normalized().HuggingFaceProxyId);
+        Assert.Null(new AppSettings { Proxies = [.. proxies], HuggingFaceProxyId = ProxyIds.System }.Normalized().HuggingFaceProxyId);
+        Assert.Null(new AppSettings { Proxies = [.. proxies], HuggingFaceProxyId = "missing" }.Normalized().HuggingFaceProxyId);
+        Assert.Null(new AppSettings { HuggingFaceProxyId = "corp" }.Normalized().HuggingFaceProxyId);
+    }
+
+    [Fact]
+    public void Normalize_KeepsDirectAsHuggingFaceProxy()
+    {
+        var settings = new AppSettings { HuggingFaceProxyId = ProxyIds.Direct }.Normalized();
+
+        Assert.Equal(ProxyIds.Direct, settings.HuggingFaceProxyId);
+    }
+
+    [Fact]
+    public void Clone_CopiesHuggingFaceProxyId()
+    {
+        Assert.Equal("corp", new AppSettings { HuggingFaceProxyId = "corp" }.Clone().HuggingFaceProxyId);
+    }
+
+    [Fact]
     public void Normalize_DropsBadHeaders()
     {
         var settings = new AppSettings
@@ -235,6 +280,7 @@ public sealed class AppSettingsTests : IDisposable
             RetryBaseDelayMs = 800,
             HuggingFaceEndpoint = "https://hf-mirror.com",
             HuggingFaceToken = "hf_secret",
+            HuggingFaceProxyId = "corp",
         };
 
         store.Save(settings);
@@ -254,6 +300,7 @@ public sealed class AppSettingsTests : IDisposable
         Assert.Equal(800, loaded.RetryBaseDelayMs);
         Assert.Equal("https://hf-mirror.com", loaded.HuggingFaceEndpoint);
         Assert.Equal("hf_secret", loaded.HuggingFaceToken);
+        Assert.Equal("corp", loaded.HuggingFaceProxyId);
         Assert.Equal(db.DbPath, store.Path);
     }
 

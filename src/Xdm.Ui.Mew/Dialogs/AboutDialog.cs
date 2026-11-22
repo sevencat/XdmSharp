@@ -65,7 +65,7 @@ public sealed class AboutDialog : Window
                     .LineSpacing(4)
                     .Foreground(MewTheme.TextSecondary),
                 new TextBlock()
-                    .Text(".NET 10 · MewUI · SimdAIO · PureDb")
+                    .Text(".NET 11 · MewUI · SimdAIO · PureDb")
                     .FontSize(11)
                     .Foreground(MewTheme.TextSecondary),
                 new StackPanel()

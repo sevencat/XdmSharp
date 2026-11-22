@@ -1,6 +1,6 @@
 # 测试策略
 
-命名空间根 `Xdm`，工程 `Xdm.Core.Tests` / `Xdm.Ui.Mew.Tests`，目标框架 `net10.0`。
+命名空间根 `Xdm`，工程 `Xdm.Core.Tests` / `Xdm.Ui.Mew.Tests`，目标框架 `net11.0`。
 
 ## 1. 分层
 

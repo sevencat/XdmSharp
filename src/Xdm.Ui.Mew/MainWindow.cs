@@ -426,8 +426,9 @@ public sealed class MainWindow : Window
             _vm.ProxyChoices,
             _settings.HuggingFaceEndpoint,
             _settings.HuggingFaceToken,
-            hfProxy: ProxyResolver.Resolve(_settings, null),
-            hfProxyResolver: proxyId => ProxyResolver.Resolve(_settings, proxyId));
+            hfProxy: ProxyResolver.ResolveHuggingFace(_settings),
+            hfProxyResolver: proxyId => ProxyResolver.Resolve(_settings, proxyId),
+            hfProxyId: _settings.HuggingFaceProxyId);
         if (result is null)
         {
             return;

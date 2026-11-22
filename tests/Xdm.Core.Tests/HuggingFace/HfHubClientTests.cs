@@ -113,4 +113,93 @@ public sealed class HfHubClientTests
 
         await Assert.ThrowsAsync<HfException>(() => client.GetFilesAsync(Repo(server), null, Ct));
     }
+
+    // ── 模型搜索 ──────────────────────────────────────────────────────────
+
+    [Fact]
+    public void SearchUrl_CarriesKeywordAndSortsByDownloads()
+    {
+        var url = HfHubClient.SearchUrl("https://hf.test/", "llama 3.1", 25);
+
+        Assert.Equal(
+            "https://hf.test/api/models?search=llama%203.1&limit=25&sort=downloads&direction=-1",
+            url);
+    }
+
+    [Fact]
+    public void SearchUrl_EmptyEndpointFallsBackToOfficialSite()
+    {
+        Assert.StartsWith(
+            HfRepo.DefaultEndpoint + "/api/models?search=x",
+            HfHubClient.SearchUrl(null, "x"),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SearchModels_ParsesIdStatsAndSkipsNonRepoIds()
+    {
+        using var server = new FakeHttpServer();
+        server.AddText("/api/models", """
+            [
+              { "id": "meta-llama/Llama-3.1-8B", "downloads": 12345, "likes": 67,
+                "pipeline_tag": "text-generation" },
+              { "id": "no-owner", "downloads": 1 },
+              { "id": "a/b/c", "downloads": 2 },
+              { "id": "Qwen/Qwen2.5-7B-Instruct" }
+            ]
+            """);
+        using var client = new HfHubClient();
+
+        var models = await client.SearchModelsAsync(server.BaseUrl, "llama", null, 20, Ct);
+
+        Assert.Collection(
+            models,
+            model =>
+            {
+                Assert.Equal("meta-llama/Llama-3.1-8B", model.Id);
+                Assert.Equal(12345, model.Downloads);
+                Assert.Equal(67, model.Likes);
+                Assert.Equal("text-generation", model.PipelineTag);
+            },
+            model =>
+            {
+                Assert.Equal("Qwen/Qwen2.5-7B-Instruct", model.Id);
+                Assert.Null(model.Downloads);
+            });
+        Assert.Equal("/api/models", Assert.Single(server.Requests).Path);
+    }
+
+    [Fact]
+    public async Task SearchModels_SendsBearerToken()
+    {
+        using var server = new FakeHttpServer();
+        server.AddText("/api/models", "[]");
+        using var client = new HfHubClient();
+
+        await client.SearchModelsAsync(server.BaseUrl, "qwen", "hf_secret", 10, Ct);
+
+        Assert.Equal("Bearer hf_secret", Assert.Single(server.Requests).Headers["Authorization"]);
+    }
+
+    [Fact]
+    public async Task SearchModels_EmptyKeyword_SkipsRequest()
+    {
+        using var server = new FakeHttpServer();
+        using var client = new HfHubClient();
+
+        var models = await client.SearchModelsAsync(server.BaseUrl, "   ", null, 20, Ct);
+
+        Assert.Empty(models);
+        Assert.Empty(server.Requests);
+    }
+
+    [Fact]
+    public async Task SearchModels_NonJson_ThrowsHfException()
+    {
+        using var server = new FakeHttpServer();
+        server.AddText("/api/models", "<html>login</html>");
+        using var client = new HfHubClient();
+
+        await Assert.ThrowsAsync<HfException>(() => client.SearchModelsAsync(server.BaseUrl, "llama", null, 20, Ct));
+    }
 }

@@ -15,9 +15,10 @@ public sealed class AppSettings
     /// <summary>
     /// 当前设置文件结构版本（2 起：单代理 → 具名代理列表；3 起：加 HuggingFace 站点/令牌；
     /// 4 起：加全局连接上限 <see cref="MaxConnections"/>；5 起：加单任务文件并发
-    /// <see cref="MaxFilesPerTask"/>）。
+    /// <see cref="MaxFilesPerTask"/>；6 起：加 HuggingFace 专用代理
+    /// <see cref="HuggingFaceProxyId"/>）。
     /// </summary>
-    public const int CurrentSchemaVersion = 5;
+    public const int CurrentSchemaVersion = 6;
 
     /// <summary>同时下载的任务数上限（1–32）。</summary>
     public int MaxConcurrent { get; set; } = 3;
@@ -68,6 +69,17 @@ public sealed class AppSettings
     /// </summary>
     public string? HuggingFaceToken { get; set; }
 
+    /// <summary>
+    /// HuggingFace 请求（搜索 / 文件清单 / 模型包下载）默认走的代理 id：
+    /// <c>null</c> = 跟随 <see cref="DefaultProxyId"/>，<see cref="ProxyIds.Direct"/> = 直连，
+    /// 其余是 <see cref="Proxies"/> 里某条的 <see cref="ProxyProfile.Id"/>。
+    /// </summary>
+    /// <remarks>
+    /// HF 站点与 CDN 常需要单独穿墙（与普通下载的默认代理不是同一条），所以这里允许另配；
+    /// 不配时行为与加这个字段之前完全一致。
+    /// </remarks>
+    public string? HuggingFaceProxyId { get; set; }
+
     /// <summary>新建任务的默认保存目录；为空时用用户 Downloads。</summary>
     public string? DefaultSaveFolder { get; set; }
 
@@ -99,6 +111,7 @@ public sealed class AppSettings
         DefaultHeaders = new Dictionary<string, string>(DefaultHeaders, StringComparer.OrdinalIgnoreCase),
         HuggingFaceEndpoint = HuggingFaceEndpoint,
         HuggingFaceToken = HuggingFaceToken,
+        HuggingFaceProxyId = HuggingFaceProxyId,
         DefaultSaveFolder = DefaultSaveFolder,
         NotifyOnComplete = NotifyOnComplete,
         MaxRetries = MaxRetries,
@@ -116,6 +129,7 @@ public sealed class AppSettings
         // 旧版「全局自定义代理」迁进来后必须当默认用，否则升级后悄悄变回系统代理。
         var defaultProxyId = NormalizeProxyId(DefaultProxyId, proxies)
             ?? (proxies.Any(p => string.Equals(p.Id, LegacyProxyId, StringComparison.Ordinal)) ? LegacyProxyId : null);
+        var huggingFaceProxyId = NormalizeHuggingFaceProxyId(HuggingFaceProxyId, proxies);
 
         return new AppSettings
         {
@@ -135,6 +149,7 @@ public sealed class AppSettings
             DefaultHeaders = SanitizeHeaders(DefaultHeaders),
             HuggingFaceEndpoint = SanitizeEndpoint(HuggingFaceEndpoint),
             HuggingFaceToken = SanitizeToken(HuggingFaceToken),
+            HuggingFaceProxyId = huggingFaceProxyId,
             DefaultSaveFolder = string.IsNullOrWhiteSpace(DefaultSaveFolder) ? null : DefaultSaveFolder.Trim(),
             NotifyOnComplete = NotifyOnComplete,
             MaxRetries = Math.Clamp(MaxRetries, 0, 10),
@@ -229,6 +244,29 @@ public sealed class AppSettings
         if (id is ProxyIds.System or ProxyIds.Direct)
         {
             return id == ProxyIds.System ? null : ProxyIds.Direct;
+        }
+
+        return proxies.Any(p => string.Equals(p.Id, id, StringComparison.Ordinal)) ? id : null;
+    }
+
+    /// <summary>
+    /// HF 代理 id 清洗：空 / <see cref="ProxyIds.System"/> = 跟随默认代理（<c>null</c>）；
+    /// <see cref="ProxyIds.Direct"/> = 直连；其余必须是现存代理，被删了就退回跟随默认代理。
+    /// </summary>
+    /// <remarks>
+    /// 老设置文件没有这个字段，读出来是 <c>null</c> → 跟随默认代理，与加字段之前的行为一致。
+    /// </remarks>
+    private static string? NormalizeHuggingFaceProxyId(string? proxyId, List<ProxyProfile> proxies)
+    {
+        var id = (proxyId ?? string.Empty).Trim();
+        if (id.Length == 0 || string.Equals(id, ProxyIds.System, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        if (string.Equals(id, ProxyIds.Direct, StringComparison.Ordinal))
+        {
+            return ProxyIds.Direct;
         }
 
         return proxies.Any(p => string.Equals(p.Id, id, StringComparison.Ordinal)) ? id : null;

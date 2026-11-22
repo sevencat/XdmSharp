@@ -95,9 +95,10 @@ public static class SampleDownloads
     private static DownloadRecord Group(DateTimeOffset now) => new()
     {
         Id = GroupId,
-        FileName = "Qwen2.5-7B-Instruct",
+        // 与真实 HF 任务对齐：父行显示 owner/模型名，落盘在 {下载目录}/owner/模型名。
+        FileName = "Qwen/Qwen2.5-7B-Instruct",
         Url = "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct",
-        TargetFolder = @"D:\Downloads\Qwen2.5-7B-Instruct",
+        TargetFolder = @"D:\Downloads\Qwen\Qwen2.5-7B-Instruct",
         SizeBytes = 15_200_000_000,
         SyncedBytes = 8_700_000_000,
         SpeedBps = 6_400_000,
@@ -129,7 +130,7 @@ public static class SampleDownloads
                 ParentId = GroupId,
                 FileName = $"model-0000{index}-of-00004.safetensors",
                 Url = $"https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/resolve/main/model-0000{index}-of-00004.safetensors",
-                TargetFolder = @"D:\Downloads\Qwen2.5-7B-Instruct",
+                TargetFolder = @"D:\Downloads\Qwen\Qwen2.5-7B-Instruct",
                 SizeBytes = size,
                 SyncedBytes = synced,
                 SpeedBps = speed,

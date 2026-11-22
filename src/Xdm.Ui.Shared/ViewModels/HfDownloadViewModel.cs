@@ -15,15 +15,19 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
 {
     public const string DefaultRevision = "main";
 
+    /// <summary>一次搜索返回的条数（够挑就行，避免列表拖太长）。</summary>
+    public const int SearchLimit = 20;
+
     private HfHubClient _client;
     private readonly bool _ownsClient;
     private readonly string _endpoint;
     private readonly string? _token;
     private string _repo = string.Empty;
     private string _revision = DefaultRevision;
-    private string _statusText = "填 owner/模型名后拉取文件清单";
+    private string _statusText = "输入模型关键字搜索，或直接填 owner/模型名后拉取文件清单";
     private bool _isBusy;
     private IReadOnlyList<HfFile> _files = [];
+    private IReadOnlyList<HfModelSummary> _searchResults = [];
 
     /// <param name="endpoint">设置里的 HuggingFace 站点根。</param>
     /// <param name="token">令牌（可为空；调用方负责先取设置再取 <c>HF_TOKEN</c>）。</param>
@@ -45,7 +49,7 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
         _client = client ?? new HfHubClient(proxy: proxy);
     }
 
-    /// <summary>模型 id 输入（<c>owner/name</c> 或模型页 URL）。</summary>
+    /// <summary>模型 id / 搜索关键字输入（<c>owner/name</c>、模型页 URL 或关键字片段）。</summary>
     public string Repo
     {
         get => _repo;
@@ -74,6 +78,21 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
 
     public bool HasFiles => _files.Count > 0;
 
+    /// <summary>搜索命中的模型（按下载量降序，服务端已排好）。</summary>
+    public IReadOnlyList<HfModelSummary> SearchResults
+    {
+        get => _searchResults;
+        private set
+        {
+            if (SetProperty(ref _searchResults, value))
+            {
+                RaisePropertyChanged(nameof(HasSearchResults));
+            }
+        }
+    }
+
+    public bool HasSearchResults => _searchResults.Count > 0;
+
     /// <summary>提示行（成功是清单摘要，失败是原因）。</summary>
     public string StatusText
     {
@@ -98,6 +117,61 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
 
         StatusText = error;
         return false;
+    }
+
+    /// <summary>
+    /// 按 <see cref="Repo"/> 里的输入当关键字搜模型（同步，调用方放后台线程）。
+    /// 返回是否命中；失败原因写 <see cref="StatusText"/>。
+    /// </summary>
+    public bool Search(CancellationToken cancellationToken = default)
+    {
+        var keyword = _repo.Trim();
+        if (keyword.Length == 0)
+        {
+            StatusText = "请输入模型关键字或 owner/模型名再搜索";
+            return false;
+        }
+
+        IsBusy = true;
+        StatusText = $"正在搜索「{keyword}」…";
+        try
+        {
+            var results = _client
+                .SearchModelsAsync(_endpoint, keyword, _token, SearchLimit, cancellationToken)
+                .GetAwaiter()
+                .GetResult();
+
+            SearchResults = results;
+            StatusText = results.Count == 0
+                ? $"没有找到「{keyword}」，换个关键字或直接填 owner/模型名"
+                : $"找到 {results.Count} 个模型，点一条拉取文件清单";
+            return results.Count > 0;
+        }
+        catch (HfException ex)
+        {
+            SearchResults = [];
+            StatusText = ex.Message;
+            return false;
+        }
+        catch (HttpRequestException ex)
+        {
+            SearchResults = [];
+            StatusText = $"连接 HuggingFace 失败：{ex.Message}";
+            return false;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>选中一条搜索结果：填进模型 id 并清空结果（接着点「拉取文件」或由界面直接拉）。</summary>
+    public void SelectModel(HfModelSummary model)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+
+        Repo = model.Id;
+        SearchResults = [];
     }
 
     /// <summary>同步拉清单（调用方放后台线程）。返回是否成功。</summary>
@@ -218,11 +292,12 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
         return true;
     }
 
-    /// <summary>下拉刷新后清掉旧清单（换仓库时避免勾到上一个仓库的文件）。</summary>
+    /// <summary>换仓库后清掉旧清单与旧搜索结果（避免勾到上一个仓库的文件）。</summary>
     public void ClearFiles()
     {
         Files = [];
-        StatusText = "填 owner/模型名后拉取文件清单";
+        SearchResults = [];
+        StatusText = "输入模型关键字搜索，或直接填 owner/模型名后拉取文件清单";
     }
 
     public void Dispose()
