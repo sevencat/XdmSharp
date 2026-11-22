@@ -303,7 +303,81 @@ public class NewDownloadDialogTests
 
         Assert.False(dialog.Submit());
         Assert.Null(dialog.Group);
-        Assert.True(VisualTree.ContainsText(dialog.Content, "先点一条搜索结果"));
+        // 提示要指到「下载此模型」这个新按钮上，而不是含糊的「点一条搜索结果」。
+        Assert.True(VisualTree.ContainsText(dialog.Content, "或在文件页拉取文件清单"));
+    }
+
+    [Fact]
+    public void HuggingFace_PickSearchResult_OnlySelects_AndEnablesDetails()
+    {
+        var folder = NewTempFolder();
+        var dialog = NewSearchableDialog(folder);
+        dialog.SelectHuggingFaceTab();
+        dialog.HuggingFace.Repo = "llama";
+        dialog.SearchHuggingFace();
+
+        // 刚搜完还没选：两个按钮都不可用。
+        Assert.False(dialog.CanShowDetails);
+        Assert.False(dialog.CanDownloadPicked);
+
+        dialog.SelectSearchResult(0);
+
+        // 选中只给按钮解锁，不自动拉清单（还能接着看别的模型）。
+        Assert.True(dialog.IsShowingSearchResults);
+        Assert.True(dialog.CanShowDetails);
+        Assert.True(dialog.CanDownloadPicked);
+        Assert.Empty(dialog.HuggingFace.Files);
+    }
+
+    [Fact]
+    public void HuggingFace_Details_ReadsFileCountAndReadmeSummary()
+    {
+        var folder = NewTempFolder();
+        var dialog = NewSearchableDialog(folder);
+        dialog.SelectHuggingFaceTab();
+        dialog.HuggingFace.Repo = "llama";
+        dialog.SearchHuggingFace();
+        dialog.SelectSearchResult(0);
+
+        var details = dialog.LoadDetailsForPick();
+
+        Assert.NotNull(details);
+        Assert.Equal("meta-llama/Llama-3.1-8B", details!.Id);
+        Assert.Equal(1, details.FileCount);
+        Assert.Equal(100, details.TotalBytes);
+        Assert.Equal("text-generation", details.PipelineTag);
+        Assert.Equal(5, details.Downloads);
+        Assert.Equal("Qwen 的镜像说明。", details.Summary);
+        Assert.Contains("1 个文件", dialog.HuggingFace.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HuggingFace_Details_WorksForManuallyTypedRepo()
+    {
+        var folder = NewTempFolder();
+        var dialog = NewSearchableDialog(folder);
+        dialog.SelectHuggingFaceTab();
+        dialog.HuggingFace.Repo = "owner/name";
+        dialog.RefreshHuggingFaceFiles();
+
+        Assert.True(dialog.CanShowDetails);
+
+        var details = dialog.LoadDetailsForPick();
+
+        // 刚拉过清单 → 详情直接复用，不会再请求一遍 tree。
+        Assert.NotNull(details);
+        Assert.Equal("owner/name", details!.Id);
+        Assert.Equal(1, details.FileCount);
+    }
+
+    [Fact]
+    public void HuggingFace_Details_WithoutTarget_IsRejected()
+    {
+        var dialog = NewSearchableDialog(NewTempFolder());
+        dialog.SelectHuggingFaceTab();
+
+        Assert.False(dialog.CanShowDetails);
+        Assert.Null(dialog.LoadDetailsForPick());
     }
 
     private static NewDownloadDialog NewSearchableDialog(string saveFolder)
@@ -329,9 +403,12 @@ public class NewDownloadDialogTests
         {
             _ = cancellationToken;
 
-            var json = request.RequestUri!.AbsolutePath.EndsWith("/api/models", StringComparison.Ordinal)
+            var path = request.RequestUri!.AbsolutePath;
+            var json = path.EndsWith("/api/models", StringComparison.Ordinal)
                 ? """[{ "id": "meta-llama/Llama-3.1-8B", "downloads": 5, "pipeline_tag": "text-generation" }]"""
-                : """[{ "type": "file", "path": "config.json", "size": 100 }]""";
+                : path.EndsWith("/README.md", StringComparison.Ordinal)
+                    ? "---\nlicense: mit\n---\n\nQwen 的镜像说明。"
+                    : """[{ "type": "file", "path": "config.json", "size": 100 }]""";
 
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             {

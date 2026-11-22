@@ -41,6 +41,13 @@ public sealed class NewDownloadDialog : Window
     private readonly TextBlock _hfStatus;
     private readonly Button _fetchButton;
     private readonly Button _searchButton;
+    private readonly Button _selectAllButton;
+    private readonly Button _clearSelectionButton;
+    private readonly Button _detailsButton;
+    private readonly Button _downloadPickedButton;
+
+    /// <summary>搜索结果里选中的那条（「详情」「下载此模型」都作用于它）。</summary>
+    private HfModelSummary? _pickedModel;
 
     public NewDownloadDialog(
         string? initialUrl = null,
@@ -167,14 +174,19 @@ public sealed class NewDownloadDialog : Window
             .ItemTemplate<HfModelSummary>(build: BuildModelRow, bind: BindModelRow);
         _hfResultsList.HorizontalScroll = ScrollMode.Disabled;
         _hfResultsList.IsVisible = false;
-        // 点一条 = 选中模型并立刻拉它的文件清单（搜索的目的就是下载）。
+        // 点一条 = 只选中：底部「详情」「下载此模型」都以它为目标（先看简介再决定下不下）。
         _hfResultsList.OnSelectionChanged(item =>
         {
-            if (item is HfModelSummary model)
-            {
-                OnPickModel(model);
-            }
+            _pickedModel = item as HfModelSummary;
+            UpdateHfFooter();
         });
+
+        _selectAllButton = SmallButton("全选", () => _hfList.SelectAll());
+        _clearSelectionButton = SmallButton("全不选", () => _hfList.ClearSelection());
+        _detailsButton = SmallButton("详情", OnShowDetails);
+        _downloadPickedButton = SmallButton("下载此模型", OnDownloadPickedModel);
+        _downloadPickedButton.IsVisible = false;
+        _detailsButton.IsEnabled = false;
 
         _tabs = new TabControl()
             .Height(TabAreaHeight)
@@ -315,11 +327,14 @@ public sealed class NewDownloadDialog : Window
                     .Row(2),
                 // 文件清单与搜索结果叠在同一格，靠 IsVisible 切换。
                 new Grid().Children(_hfList, _hfResultsList).Row(4),
+                // 文件模式给「全选/全不选」，搜索结果模式给「详情/下载此模型」（按 IsVisible 切换）。
                 new Grid()
-                    .Columns("Auto,Auto,*")
+                    .Columns("Auto,Auto,*,Auto,Auto")
                     .Children(
-                        SmallButton("全选", _hfList.SelectAll).Column(0),
-                        SmallButton("全不选", _hfList.ClearSelection).Column(1).Margin(8, 0, 0, 0))
+                        _selectAllButton.Column(0),
+                        _clearSelectionButton.Column(1).Margin(8, 0, 0, 0),
+                        _detailsButton.Column(3).Margin(0, 0, 8, 0),
+                        _downloadPickedButton.Column(4))
                     .Row(6),
                 _hfStatus.Row(8));
     }
@@ -494,19 +509,19 @@ public sealed class NewDownloadDialog : Window
     }
 
     /// <summary>同步方法丢到线程池，结果经 Dispatcher 回 UI 线程。</summary>
-    private static void RunInBackground(Func<bool> work, Action<bool> apply)
+    private static void RunInBackground<T>(Func<T> work, Action<T> apply)
     {
         var dispatcher = Application.Current?.Dispatcher;
         Task.Run(() =>
         {
-            var ok = work();
+            var result = work();
             if (dispatcher is null)
             {
-                apply(ok);
+                apply(result);
             }
             else
             {
-                dispatcher.BeginInvoke(() => apply(ok));
+                dispatcher.BeginInvoke(() => apply(result));
             }
         });
     }
@@ -521,8 +536,10 @@ public sealed class NewDownloadDialog : Window
         }
 
         // 有清单就回到文件模式（搜索点选、直接拉取都走这里）。
+        _pickedModel = null;
         _hfResultsList.IsVisible = false;
         _hfList.IsVisible = true;
+        UpdateHfFooter();
 
         _hfStatus.Text = _hf.StatusText;
         _fetchButton.IsEnabled = true;
@@ -536,8 +553,10 @@ public sealed class NewDownloadDialog : Window
         _hfResultsList.ItemsSource(ItemsView.Create(_hf.SearchResults.ToList()));
 
         var hasResults = _hf.HasSearchResults;
+        _pickedModel = null;
         _hfResultsList.IsVisible = hasResults;
         _hfList.IsVisible = !hasResults;
+        UpdateHfFooter();
 
         _hfStatus.Text = _hf.StatusText;
         _fetchButton.IsEnabled = true;
@@ -551,11 +570,82 @@ public sealed class NewDownloadDialog : Window
         _hf.SelectModel(model);
         _hfRepoBox.Text = _hf.Repo;
 
+        _pickedModel = null;
         _hfResultsList.IsVisible = false;
         _hfList.IsVisible = true;
         _hfResultsList.ItemsSource(ItemsView.Create(new List<HfModelSummary>()));
+        UpdateHfFooter();
 
         OnFetchFiles();
+    }
+
+    /// <summary>底部按钮随模式切换：文件模式「全选/全不选」，结果模式「详情/下载此模型」。</summary>
+    private void UpdateHfFooter()
+    {
+        var picking = _hfResultsList.IsVisible;
+        _selectAllButton.IsVisible = !picking;
+        _clearSelectionButton.IsVisible = !picking;
+        _downloadPickedButton.IsVisible = picking;
+        _downloadPickedButton.IsEnabled = picking && _pickedModel is not null;
+
+        // 「详情」两种模式都能用：结果模式看选中的模型，文件模式看当前输入（或刚拉过的仓库）。
+        _detailsButton.IsEnabled = picking ? _pickedModel is not null : _hf.Repo.Trim().Length > 0;
+    }
+
+    /// <summary>结果模式点「下载此模型」：等同以前的「点一条就拉清单」。</summary>
+    private void OnDownloadPickedModel()
+    {
+        if (_pickedModel is { } model)
+        {
+            OnPickModel(model);
+        }
+    }
+
+    /// <summary>
+    /// 「详情」：后台读文件统计 + README 摘要，回 UI 弹详情窗。
+    /// 不动清单、不切模式，看完还能接着挑别的模型。
+    /// </summary>
+    private void OnShowDetails()
+    {
+        var picking = _hfResultsList.IsVisible;
+        var target = picking ? _pickedModel?.Id : _hf.Repo;
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            ShowError(picking ? "先点一条搜索结果" : "先填模型 id，或先拉取一次文件清单");
+            return;
+        }
+
+        ApplyCurrentProxy();
+        _detailsButton.IsEnabled = false;
+        _hfStatus.Text = "正在读取模型详情…";
+
+        var model = picking ? _pickedModel : null;
+        RunInBackground(
+            () => _hf.LoadDetails(target!, model),
+            details =>
+            {
+                UpdateHfFooter();
+                _hfStatus.Text = _hf.StatusText;
+                if (details is null)
+                {
+                    ShowError(_hf.StatusText);
+                    return;
+                }
+
+                ShowModelDetails(details);
+            });
+    }
+
+    /// <summary>弹详情窗。测试里没有 <see cref="Application"/>，只把数据留在 <see cref="LastDetails"/> 里。</summary>
+    private void ShowModelDetails(HfModelDetails details)
+    {
+        LastDetails = details;
+        _errorText.IsVisible = false;
+
+        if (Application.Current is not null)
+        {
+            HfModelDetailsWindow.ShowDetails(this, details);
+        }
     }
 
     private void OnAdd()
@@ -595,7 +685,7 @@ public sealed class NewDownloadDialog : Window
         // 搜索结果模式下文件清单还是上一个仓库的，别让用户误建任务。
         if (_hfResultsList.IsVisible)
         {
-            ShowError("先点一条搜索结果，拉取该模型的文件清单");
+            ShowError("先在搜索结果里点「下载此模型」，或在文件页拉取文件清单");
             return false;
         }
 
@@ -656,6 +746,29 @@ public sealed class NewDownloadDialog : Window
 
     /// <summary>测试缝：当前显示的是搜索结果列表而不是文件清单。</summary>
     internal bool IsShowingSearchResults => _hfResultsList.IsVisible;
+
+    /// <summary>测试缝：最近一次读到的模型详情（没有 Application 时不真弹窗，只留数据）。</summary>
+    internal HfModelDetails? LastDetails { get; private set; }
+
+    /// <summary>测试缝：点一条搜索结果（等同鼠标选中那一行，不拉清单）。</summary>
+    internal void SelectSearchResult(int index)
+    {
+        _pickedModel = index >= 0 && index < _hf.SearchResults.Count ? _hf.SearchResults[index] : null;
+        UpdateHfFooter();
+    }
+
+    /// <summary>测试缝：同步跑「详情」按钮的逻辑，返回详情（失败为 null）。</summary>
+    internal HfModelDetails? LoadDetailsForPick()
+    {
+        var target = _hfResultsList.IsVisible ? _pickedModel?.Id : _hf.Repo;
+        return string.IsNullOrWhiteSpace(target) ? null : _hf.LoadDetails(target, _pickedModel);
+    }
+
+    /// <summary>测试缝：「下载此模型」按钮当前可点。</summary>
+    internal bool CanDownloadPicked => _downloadPickedButton.IsEnabled;
+
+    /// <summary>测试缝：「详情」按钮当前可点。</summary>
+    internal bool CanShowDetails => _detailsButton.IsEnabled;
 
     /// <summary>测试缝：把当前清单里的文件全部勾上（等同点「全选」）。</summary>
     internal void SelectAllHuggingFaceFiles() => _hfList.SelectAll();

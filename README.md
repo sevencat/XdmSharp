@@ -17,6 +17,9 @@ Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传）�
 - **包内并发限制**：一个多文件任务同时只跑 N 个文件（默认 3），大模型包不会长期占满任务槽位
 - **HF 独立代理**：设置里可给 HuggingFace 单配一条代理（搜索 / 文件清单 / 模型包下载都走它），
   与普通下载的默认代理互不影响；不配则跟随默认代理
+- **HF 模型详情**：搜索结果选中后点「详情」，先看多少文件、共多大、任务类型与 README 简介再决定下不下；
+  点「下载此模型」才拉文件清单入队
+- **HF 搜索多关键字**：输入框里用空格或逗号分隔多个关键字（如 `qwen 7b`），只列「同时包含」它们的模型
 - **默认目录**：走 `SHGetKnownFolderPath(FOLDERID_Downloads)`，用户把「下载」搬到别的盘也跟着走
 - **原生单文件**：可发布 NativeAOT 档（`build.ps1 -Aot`），15 MB 单 exe，目标机零依赖
 
@@ -200,7 +203,7 @@ dotnet run --project src/Xdm.App.Mew -- https://example.com/a.bin   # 直接弹�
 $env:XDM_DEMO=1000; dotnet run --project src/Xdm.App.Mew   # 1000 条假数据，复验列表虚拟化
 # 同一任务库只允许一个进程：已有实例在跑时，第二个进程把链接交给它后自己退出（退出码 0）
 # 键按库路径哈希计算，所以不同 --db 的两个实例可以并存（多配置并行下载）
-dotnet test                                   # 全部测试（353 条：Core 250 + Ui.Mew 103）
+dotnet test                                   # 全部测试（382 条：Core 271 + Ui.Mew 111）
 dotnet test tests/Xdm.Ui.Mew.Tests            # 视图层测试（结构/命令桥/对话框/布局）
 pwsh tools/make-icons.ps1                     # 改了 logo.png 后重生成 xdm-logo.png / xdm.ico
 .\build.ps1 -Configuration Release -Test -Publish   # ①构建 ②测试 ③发布 win-x64

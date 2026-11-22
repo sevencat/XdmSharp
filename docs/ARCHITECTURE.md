@@ -769,9 +769,20 @@ V3：infohash / torrent 路径），首期恒为 NULL。
 7. **未做**：`cache_edit`/权限字段过滤、多连接加速（`PLAN.md` 待决 #6）。
 8. **模型搜索**（2026-11-23）：`HfHubClient.SearchModelsAsync` 打
    `GET {endpoint}/api/models?search=…&limit=20&sort=downloads&direction=-1`，解析 `id`/`downloads`/`likes`/`pipeline_tag`，
-   只保留两段 `owner/name`；对话框里「搜索」与「拉取文件」共用一个输入框，结果在文件列表同一位置顶替显示，
-   点一条即填入模型 id 并自动拉清单（结果模式下点「添加」会被拦下，避免拿上一个仓库的勾选建任务）。
+   只保留两段 `owner/name`；对话框里「搜索」与「拉取文件」共用一个输入框，结果在文件列表同一位置顶替显示
+   （结果模式下点「添加」会被拦下，避免拿上一个仓库的勾选建任务）。
    搜索与清单共用同一代理单选与 token。
+9. **模型详情**（2026-11-23）：结果模式下点一行只**选中**，底部按钮变成「详情」「下载此模型」——
+   先看简介再决定下不下，不会一点就把列表切走。「详情」走
+   `HfHubClient.GetReadmeAsync`（`GET {endpoint}/{repo}/raw/{rev}/README.md`，404 视为「没写 README」返回 null）
+   + 文件清单统计，合成 `HfModelDetails`（文件数、总大小、任务类型、下载/点赞、README 摘要）后由
+   `HfModelDetailsWindow` 显示；清单刚拉过且仓库相同则直接复用，不再请求一遍。
+   README 摘要在 `HfReadme.Summarize` 里做：去 YAML 头 / HTML / 图片 / markdown 记号，压空白，按单词边界截到 400 字。
+   文件模式下「详情」对当前输入框里的模型 id 生效（手填 id 也能看）。
+10. **多关键字搜索**（2026-11-23）：输入按空格 / 中英文逗号 / 分号拆成关键字（`HfHubClient.SplitKeywords`，
+    去空、忽略大小写去重、最多 5 个）。HF 的 `search` 只认单个串，所以多个关键字是**每个各查一次再按 id 取交集**
+    （AND 语义，统计量取两边较大值，仍按下载量降序）；第一个关键字无命中就直接返回，不再发后续请求。
+    单个关键字仍是一次请求、URL 与以前完全一样。
 
 #### 12.2.2 父任务汇总（2026-11-23，契约 1/2 落地）
 

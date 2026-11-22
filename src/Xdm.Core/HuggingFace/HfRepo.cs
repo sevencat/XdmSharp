@@ -26,6 +26,9 @@ public sealed record HfRepo
     public string FilesApiUrl =>
         $"{Endpoint}/api/models/{Owner}/{Name}/tree/{Uri.EscapeDataString(Revision)}?recursive=true&expand=true";
 
+    /// <summary>README 原文地址（详情页摘要用）；仓库没有 README 时服务端回 404。</summary>
+    public string ReadmeUrl => $"{Endpoint}/{Owner}/{Name}/raw/{Uri.EscapeDataString(Revision)}/README.md";
+
     /// <summary>单文件下载地址；<c>?download=true</c> 让服务端回 <c>Content-Disposition: attachment</c>。</summary>
     public string ResolveUrl(string path)
     {

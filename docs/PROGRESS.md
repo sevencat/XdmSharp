@@ -33,6 +33,29 @@
 
 ## 日志
 
+### 2026-11-23 · HF 搜索支持多关键字
+
+- `HfHubClient.SplitKeywords`：按空格 / 中英文逗号 / 分号拆分，去空、忽略大小写去重，最多 5 个关键字。
+- 单个关键字走老路径（一次请求、URL 不变）；多个关键字**每个各查一次再按 id 取交集**（HF 的 `search` 只认单个串，
+  AND 只能客户端拼），统计量取两边较大值，仍按下载量降序；第一个关键字没命中就直接返回，不再打后续请求。
+- VM 提示分单/多关键字两套文案（`正在搜索「qwen」「7b」…` / `找到 3 个同时匹配 qwen、7b 的模型…`），
+  空闲提示改成说明「空格或逗号分开多个即同时包含」。
+- 测试：Core +7（拆分 4、交集 1、短路 1、上限 1），Ui.Mew +2（交集文案、无交集文案）。全量 **382 通过**
+  （Core 271 + Ui.Mew 111）。
+
+### 2026-11-23 · HF 搜索结果加「详情」
+
+- **交互变了**：搜索结果点一行现在只**选中**（以前一点就填 id 并拉清单）。底部按钮按模式切换：
+  结果模式给「详情」「下载此模型」，文件模式仍是「全选」「全不选」；「详情」两种模式都能用
+  （结果模式看选中项，文件模式看输入框里的模型 id）。
+- **详情内容**：文件数、总大小、任务类型、下载/点赞、README 摘要。
+  `HfHubClient.GetReadmeAsync` 拉 `{endpoint}/{repo}/raw/{rev}/README.md`（404 = 没写 README，返回 null）；
+  `HfReadme.Summarize` 去 YAML 头/HTML/图片/markdown 记号后截 400 字；`HfModelDetails.Create` 汇总。
+  清单刚拉过且同仓库时直接复用，不重复请求。
+- **窗口**：`HfModelDetailsWindow`（520×360，标题栏复用 `TitleBarChrome`），README 摘要可滚动。
+- **测试**：Core +14（README 摘要 5、详情聚合 2、客户端 README 拉取 3、URL 1 …），Ui.Mew +6
+  （选中/按钮状态、详情数据、手填 id、无目标拒绝、详情窗渲染 2）。全量 **373 通过**（Core 264 + Ui.Mew 109）。
+
 ### 2026-11-23 · HuggingFace 专用代理
 
 - **设置项**：`AppSettings.HuggingFaceProxyId`（结构版本 5 → 6）。`null` = 跟随 `DefaultProxyId`

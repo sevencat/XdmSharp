@@ -18,16 +18,20 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
     /// <summary>一次搜索返回的条数（够挑就行，避免列表拖太长）。</summary>
     public const int SearchLimit = 20;
 
+    /// <summary>空闲时的提示行（清空/重建后恢复成这句）。</summary>
+    public const string Hint = "输入模型关键字（空格或逗号分开多个即「同时包含」）搜索，或直接填 owner/模型名后拉取文件清单";
+
     private HfHubClient _client;
     private readonly bool _ownsClient;
     private readonly string _endpoint;
     private readonly string? _token;
     private string _repo = string.Empty;
     private string _revision = DefaultRevision;
-    private string _statusText = "输入模型关键字搜索，或直接填 owner/模型名后拉取文件清单";
+    private string _statusText = Hint;
     private bool _isBusy;
     private IReadOnlyList<HfFile> _files = [];
     private IReadOnlyList<HfModelSummary> _searchResults = [];
+    private string? _filesRepo;
 
     /// <param name="endpoint">设置里的 HuggingFace 站点根。</param>
     /// <param name="token">令牌（可为空；调用方负责先取设置再取 <c>HF_TOKEN</c>）。</param>
@@ -121,30 +125,40 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
 
     /// <summary>
     /// 按 <see cref="Repo"/> 里的输入当关键字搜模型（同步，调用方放后台线程）。
+    /// 输入里的空格/逗号会把关键字拆开，多个关键字是「同时包含」（见 <see cref="HfHubClient.SplitKeywords"/>）。
     /// 返回是否命中；失败原因写 <see cref="StatusText"/>。
     /// </summary>
     public bool Search(CancellationToken cancellationToken = default)
     {
-        var keyword = _repo.Trim();
-        if (keyword.Length == 0)
+        var keywords = HfHubClient.SplitKeywords(_repo);
+        if (keywords.Count == 0)
         {
             StatusText = "请输入模型关键字或 owner/模型名再搜索";
             return false;
         }
 
+        // 一个关键字沿用老文案；多个关键字说清是「同时匹配」。
+        var single = keywords.Count == 1;
+        var label = single ? $"「{keywords[0]}」" : $"「{string.Join("」「", keywords)}」";
+        var all = string.Join("、", keywords);
+
         IsBusy = true;
-        StatusText = $"正在搜索「{keyword}」…";
+        StatusText = $"正在搜索{label}…";
         try
         {
             var results = _client
-                .SearchModelsAsync(_endpoint, keyword, _token, SearchLimit, cancellationToken)
+                .SearchModelsAsync(_endpoint, string.Join(' ', keywords), _token, SearchLimit, cancellationToken)
                 .GetAwaiter()
                 .GetResult();
 
             SearchResults = results;
-            StatusText = results.Count == 0
-                ? $"没有找到「{keyword}」，换个关键字或直接填 owner/模型名"
-                : $"找到 {results.Count} 个模型，点一条拉取文件清单";
+            StatusText = (results.Count, single) switch
+            {
+                (0, true) => $"没有找到{label}，换个关键字或直接填 owner/模型名",
+                (0, false) => $"没有找到同时匹配 {all} 的模型，换个关键字或直接填 owner/模型名",
+                (_, true) => $"找到 {results.Count} 个模型，点一条选中后可看详情或拉取文件清单",
+                _ => $"找到 {results.Count} 个同时匹配 {all} 的模型，点一条选中后可看详情或拉取文件清单",
+            };
             return results.Count > 0;
         }
         catch (HfException ex)
@@ -192,6 +206,7 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
                 .GetResult();
 
             Files = files;
+            _filesRepo = repo.Repo;
             StatusText = files.Count == 0
                 ? "这个仓库在指定版本下没有文件"
                 : $"{files.Count} 个文件，共 {TextFormat.Bytes(files.Sum(static f => f.Size ?? 0))}";
@@ -208,6 +223,63 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
             Files = [];
             StatusText = $"连接 HuggingFace 失败：{ex.Message}";
             return false;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 拉「模型详情」（文件数 / 总大小 / README 摘要），同步，调用方放后台线程。
+    /// <paramref name="model"/> 是搜索结果里的那条（可空：手填 id 时没有下载量/任务类型）。
+    /// 清单刚拉过且是同一个仓库时直接复用，不再请求一遍。
+    /// 失败写 <see cref="StatusText"/> 并返回 <see langword="null"/>。
+    /// </summary>
+    public HfModelDetails? LoadDetails(
+        string modelId,
+        HfModelSummary? model = null,
+        CancellationToken cancellationToken = default)
+    {
+        var revision = HfRepo.RevisionFromUrl(modelId, Revision.Trim());
+        if (!HfRepo.TryParse(modelId, _endpoint, revision, out var repo, out var error))
+        {
+            StatusText = error;
+            return null;
+        }
+
+        IsBusy = true;
+        StatusText = $"正在读取 {repo.Repo} 的详情…";
+        try
+        {
+            var files = string.Equals(_filesRepo, repo.Repo, StringComparison.OrdinalIgnoreCase) && _files.Count > 0
+                ? _files
+                : _client.GetFilesAsync(repo, _token, cancellationToken).GetAwaiter().GetResult();
+
+            string? readme = null;
+            try
+            {
+                readme = _client.GetReadmeAsync(repo, _token, cancellationToken).GetAwaiter().GetResult();
+            }
+            catch (HfException)
+            {
+                // README 只是锦上添花：拉不到就别让整个详情失败，文件数照常显示。
+            }
+
+            StatusText = files.Count == 0
+                ? "这个仓库在指定版本下没有文件"
+                : $"{files.Count} 个文件，共 {TextFormat.Bytes(files.Sum(static f => f.Size ?? 0))}";
+            return HfModelDetails.Create(repo, model, files, readme);
+        }
+        catch (HfException ex)
+        {
+            StatusText = ex.Message;
+            return null;
+        }
+        catch (HttpRequestException ex)
+        {
+            StatusText = $"连接 HuggingFace 失败：{ex.Message}";
+            return null;
         }
         finally
         {
@@ -296,8 +368,9 @@ public sealed class HfDownloadViewModel : ViewModelBase, IDisposable
     public void ClearFiles()
     {
         Files = [];
+        _filesRepo = null;
         SearchResults = [];
-        StatusText = "输入模型关键字搜索，或直接填 owner/模型名后拉取文件清单";
+        StatusText = Hint;
     }
 
     public void Dispose()

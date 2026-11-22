@@ -193,6 +193,75 @@ public sealed class HfHubClientTests
         Assert.Empty(server.Requests);
     }
 
+    // ── 多关键字（空格/逗号分隔 → 各查一次再取交集）────────────────────────
+
+    [Fact]
+    public void SplitKeywords_SplitsOnSpacesAndCommas_AndDedupesIgnoringCase()
+    {
+        var keywords = HfHubClient.SplitKeywords("  qwen, 7b\tQWEN，instruct;  ");
+
+        Assert.Equal(["qwen", "7b", "instruct"], keywords);
+    }
+
+    [Fact]
+    public void SplitKeywords_CapsAtMaxKeywords()
+    {
+        var keywords = HfHubClient.SplitKeywords("a b c d e f g");
+
+        Assert.Equal(HfHubClient.MaxKeywords, keywords.Count);
+        Assert.Equal(["a", "b", "c", "d", "e"], keywords);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" \t , ，; ")]
+    public void SplitKeywords_Blank_ReturnsEmpty(string? query)
+    {
+        Assert.Empty(HfHubClient.SplitKeywords(query));
+    }
+
+    [Fact]
+    public async Task SearchModels_MultipleKeywords_IntersectsById_AndKeepsLargerCounts()
+    {
+        using var server = new FakeHttpServer();
+        server.AddText(
+            "/api/models?search=qwen&limit=20&sort=downloads&direction=-1",
+            """
+            [{ "id": "Qwen/Qwen2.5-7B-Instruct", "downloads": 900, "likes": 3 },
+             { "id": "Qwen/Qwen2.5-1.5B", "downloads": 800 }]
+            """);
+        server.AddText(
+            "/api/models?search=7b&limit=20&sort=downloads&direction=-1",
+            """
+            [{ "id": "Qwen/Qwen2.5-7B-Instruct", "downloads": 950, "likes": 10 },
+             { "id": "other/Llama-7B", "downloads": 990 }]
+            """);
+        using var client = new HfHubClient();
+
+        var models = await client.SearchModelsAsync(server.BaseUrl, "qwen, 7b", null, 20, Ct);
+
+        var model = Assert.Single(models);
+        Assert.Equal("Qwen/Qwen2.5-7B-Instruct", model.Id);
+        Assert.Equal(950, model.Downloads);
+        Assert.Equal(10, model.Likes);
+        Assert.Equal(2, server.Requests.Count);
+    }
+
+    [Fact]
+    public async Task SearchModels_MultipleKeywords_StopsWhenFirstKeywordIsEmpty()
+    {
+        using var server = new FakeHttpServer();
+        server.AddText("/api/models", "[]");
+        using var client = new HfHubClient();
+
+        var models = await client.SearchModelsAsync(server.BaseUrl, "zzz yyy", null, 20, Ct);
+
+        // 交集只会越查越小：第一个关键字就没货，后面不用再打。
+        Assert.Empty(models);
+        Assert.Single(server.Requests);
+    }
+
     [Fact]
     public async Task SearchModels_NonJson_ThrowsHfException()
     {
@@ -201,5 +270,52 @@ public sealed class HfHubClientTests
         using var client = new HfHubClient();
 
         await Assert.ThrowsAsync<HfException>(() => client.SearchModelsAsync(server.BaseUrl, "llama", null, 20, Ct));
+    }
+
+    // ── README（模型详情简介用）───────────────────────────────────────────
+
+    [Fact]
+    public async Task GetReadme_ReturnsText_WithBearerToken()
+    {
+        using var server = new FakeHttpServer();
+        server.AddText("/owner/name/raw/main/README.md", "# 标题\n\n正文。");
+        using var client = new HfHubClient();
+
+        var readme = await client.GetReadmeAsync(Repo(server), "hf_secret", Ct);
+
+        Assert.Equal("# 标题\n\n正文。", readme);
+        var request = Assert.Single(server.Requests);
+        Assert.Equal("/owner/name/raw/main/README.md", request.Path);
+        Assert.Equal("Bearer hf_secret", request.Headers["Authorization"]);
+    }
+
+    [Fact]
+    public async Task GetReadme_NotFound_IsNull_NotEmptyError()
+    {
+        using var server = new FakeHttpServer();
+        using var client = new HfHubClient();
+
+        // 仓库没写 README 是常态，不该当失败抛出去。
+        Assert.Null(await client.GetReadmeAsync(Repo(server), null, Ct));
+    }
+
+    [Fact]
+    public async Task GetReadme_Forbidden_ThrowsWithTokenHint()
+    {
+        using var server = new FakeHttpServer();
+        server.AddText("/owner/name/raw/main/README.md", "{}", statusCode: 403);
+        using var client = new HfHubClient();
+
+        var error = await Assert.ThrowsAsync<HfException>(() => client.GetReadmeAsync(Repo(server), null, Ct));
+
+        Assert.Contains("token", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ReadmeUrl_UsesRevisionAndEscapesIt()
+    {
+        var repo = new HfRepo { Endpoint = "https://hf.test", Repo = "owner/name", Revision = "refs/pr 1" };
+
+        Assert.Equal("https://hf.test/owner/name/raw/refs%2Fpr%201/README.md", repo.ReadmeUrl);
     }
 }

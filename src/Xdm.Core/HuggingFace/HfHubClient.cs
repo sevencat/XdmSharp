@@ -74,6 +74,8 @@ public sealed class HfHubClient : IDisposable
     /// <summary>
     /// 按关键字搜模型：<c>GET {endpoint}/api/models?search=…&amp;sort=downloads&amp;direction=-1</c>。
     /// 关键字就是用户输入（可以是模型 id 片段）；按下载量降序，便于挑官方/热门版本。
+    /// 空格/逗号分隔的多个关键字各查一次再按 id 取交集（HF 的 <c>search</c> 只认单个串，
+    /// 「同时包含」只能客户端拼）。
     /// </summary>
     public async Task<IReadOnlyList<HfModelSummary>> SearchModelsAsync(
         string? endpoint,
@@ -82,17 +84,114 @@ public sealed class HfHubClient : IDisposable
         int limit = 20,
         CancellationToken cancellationToken = default)
     {
-        var keyword = (query ?? string.Empty).Trim();
-        if (keyword.Length == 0)
+        var keywords = SplitKeywords(query);
+        if (keywords.Count == 0)
         {
             return [];
         }
 
+        var merged = await SearchOneAsync(endpoint, keywords[0], token, limit, cancellationToken)
+            .ConfigureAwait(false);
+
+        // 交集只可能越查越小：中间空掉就不用再发后面的请求了。
+        for (var i = 1; i < keywords.Count && merged.Count > 0; i++)
+        {
+            var page = await SearchOneAsync(endpoint, keywords[i], token, limit, cancellationToken)
+                .ConfigureAwait(false);
+            merged = Intersect(merged, page);
+        }
+
+        return merged;
+    }
+
+    /// <summary>一次搜索最多识别的关键字个数（每个关键字一条请求，别把连接池占满）。</summary>
+    public const int MaxKeywords = 5;
+
+    /// <summary>关键字分隔符：空白（含制表/换行）、中英文逗号与分号。</summary>
+    private static readonly char[] KeywordSeparators = [' ', '\t', '\r', '\n', ',', '，', ';', '；'];
+
+    /// <summary>
+    /// 把输入拆成关键字：按空白 / 逗号 / 分号分隔，去空、忽略大小写去重，最多 <see cref="MaxKeywords"/> 个。
+    /// 只有一个关键字时等价于以前的「整串当关键字」。
+    /// </summary>
+    public static IReadOnlyList<string> SplitKeywords(string? query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return [];
+        }
+
+        List<string> keywords = [];
+        foreach (var part in query.Split(
+            KeywordSeparators,
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!keywords.Contains(part, StringComparer.OrdinalIgnoreCase))
+            {
+                keywords.Add(part);
+                if (keywords.Count >= MaxKeywords)
+                {
+                    break;
+                }
+            }
+        }
+
+        return keywords;
+    }
+
+    /// <summary>单个关键字的一次搜索（就是 <c>/api/models?search=…</c> 那一页）。</summary>
+    private async Task<IReadOnlyList<HfModelSummary>> SearchOneAsync(
+        string? endpoint,
+        string keyword,
+        string? token,
+        int limit,
+        CancellationToken cancellationToken)
+    {
         var url = SearchUrl(endpoint, keyword, limit);
         using var response = await SendAsync(url, token, cancellationToken).ConfigureAwait(false);
         var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         return ParseSearchPage(json);
     }
+
+    /// <summary>按 id 求交集（大小写不敏感），统计量取两边的较大值，结果仍按下载量降序。</summary>
+    private static List<HfModelSummary> Intersect(
+        IReadOnlyList<HfModelSummary> left,
+        IReadOnlyList<HfModelSummary> right)
+    {
+        var byId = new Dictionary<string, HfModelSummary>(StringComparer.OrdinalIgnoreCase);
+        foreach (var model in right)
+        {
+            byId[model.Id] = model;
+        }
+
+        List<HfModelSummary> overlap = [];
+        foreach (var model in left)
+        {
+            if (!byId.TryGetValue(model.Id, out var other))
+            {
+                continue;
+            }
+
+            overlap.Add(new HfModelSummary
+            {
+                Id = model.Id,
+                Downloads = MaxOf(model.Downloads, other.Downloads),
+                Likes = MaxOf(model.Likes, other.Likes),
+                PipelineTag = model.PipelineTag ?? other.PipelineTag,
+            });
+        }
+
+        overlap.Sort(static (a, b) => (b.Downloads ?? -1).CompareTo(a.Downloads ?? -1));
+        return overlap;
+    }
+
+    /// <summary>两边的计数取大值；缺失一侧就用另一侧（原样保持 <see langword="null"/>）。</summary>
+    private static long? MaxOf(long? left, long? right) => (left, right) switch
+    {
+        ({ } l, { } r) => Math.Max(l, r),
+        ({ } l, null) => l,
+        _ => right,
+    };
 
     /// <summary>搜索地址（独立出来便于断言查询串）。<paramref name="limit"/> 夹到 [1, 100]。</summary>
     public static string SearchUrl(string? endpoint, string query, int limit = 20)
@@ -127,6 +226,36 @@ public sealed class HfHubClient : IDisposable
         return files;
     }
 
+    /// <summary>
+    /// 拉仓库 README 原文（<c>GET {endpoint}/{owner}/{name}/raw/{revision}/README.md</c>）。
+    /// 仓库没有 README（404）返回 <see langword="null"/>——这是常态，不算失败；
+    /// 网络/限流等其它问题照常抛 <see cref="HfException"/>。
+    /// </summary>
+    public async Task<string?> GetReadmeAsync(HfRepo repo, string? token, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(repo);
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, repo.ReadmeUrl);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/plain"));
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Trim());
+        }
+
+        using var response = await SendRawAsync(request, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw StatusError(response.StatusCode);
+        }
+
+        return await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<HttpResponseMessage> SendAsync(string url, string? token, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
@@ -136,10 +265,26 @@ public sealed class HfHubClient : IDisposable
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Trim());
         }
 
-        HttpResponseMessage response;
+        var response = await SendRawAsync(request, cancellationToken).ConfigureAwait(false);
+
+        if (response.IsSuccessStatusCode)
+        {
+            return response;
+        }
+
+        var status = response.StatusCode;
+        response.Dispose();
+        throw StatusError(status);
+    }
+
+    /// <summary>发请求并把网络层异常翻成能直接展示的 <see cref="HfException"/>；状态码交给调用方判断。</summary>
+    private async Task<HttpResponseMessage> SendRawAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
         try
         {
-            response = await _http
+            return await _http
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -151,15 +296,10 @@ public sealed class HfHubClient : IDisposable
         {
             throw new HfException("拉取 HuggingFace 清单超时，检查网络或代理", ex);
         }
+    }
 
-        if (response.IsSuccessStatusCode)
-        {
-            return response;
-        }
-
-        var status = response.StatusCode;
-        response.Dispose();
-        throw new HfException(status switch
+    private static HfException StatusError(HttpStatusCode status) =>
+        new(status switch
         {
             HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden =>
                 "HuggingFace 拒绝访问：仓库可能是私有的，或需要先在网页上同意模型许可，然后在设置里填 token",
@@ -167,7 +307,6 @@ public sealed class HfHubClient : IDisposable
             HttpStatusCode.TooManyRequests => "HuggingFace 限流了，稍后再试",
             _ => $"HuggingFace 返回 {(int)status} {status}",
         });
-    }
 
     private static IEnumerable<HfFile> ParsePage(string json, HfRepo repo)
     {

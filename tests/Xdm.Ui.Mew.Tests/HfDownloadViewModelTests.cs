@@ -203,6 +203,33 @@ public sealed class HfDownloadViewModelTests : IDisposable
     }
 
     [Fact]
+    public void Search_MultipleKeywords_IntersectsAndSaysSo()
+    {
+        // 假服务器对任何 search 都回同一条 → 交集就是那一条。
+        using var viewModel = new HfDownloadViewModel(
+            "https://hf.test", null, new HfHubClient(new HttpClient(new StubHandler(SearchJson))));
+        viewModel.Repo = "llama, 3.1";
+
+        Assert.True(viewModel.Search(TestContext.Current.CancellationToken));
+
+        Assert.Single(viewModel.SearchResults);
+        Assert.Contains("同时匹配 llama、3.1", viewModel.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Search_MultipleKeywords_NothingFound_SaysNoOverlap()
+    {
+        using var viewModel = new HfDownloadViewModel(
+            "https://hf.test", null, new HfHubClient(new HttpClient(new StubHandler("[]"))));
+        viewModel.Repo = "zzz yyy";
+
+        Assert.False(viewModel.Search(TestContext.Current.CancellationToken));
+
+        Assert.Contains("同时匹配 zzz、yyy", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.False(viewModel.HasSearchResults);
+    }
+
+    [Fact]
     public void SelectModel_FillsRepoAndClearsResults()
     {
         using var viewModel = NewSearchViewModel();
