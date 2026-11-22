@@ -16,7 +16,7 @@
   </ItemGroup>
 
   <ItemGroup Label="Data">
-    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.15" />
+    <PackageVersion Include="PureDb" Version="1.0.0-rc.1" />
   </ItemGroup>
 
   <ItemGroup Label="Tests">

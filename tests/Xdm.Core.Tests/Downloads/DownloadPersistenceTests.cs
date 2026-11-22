@@ -44,11 +44,13 @@ public sealed class DownloadPersistenceTests
     {
         using var harness = new EngineHarness();
         using var store = new TaskStore(Path.Combine(harness.Root, "xdm.db"));
+        // 放慢到"暂停时必然没下完"：并行跑测试时 CPU 竞争会让 8ms/块的版本提前完成，
+        // 触发 InRange(synced, 1, len-1) 失败。
         var bytes = EngineHarness.MakeBytes(600_000);
         harness.Server.AddFile(
             "/slow.bin",
             bytes,
-            new FileBehavior { ChunkSize = 8 * 1024, PerChunkDelay = TimeSpan.FromMilliseconds(8) });
+            new FileBehavior { ChunkSize = 8 * 1024, PerChunkDelay = TimeSpan.FromMilliseconds(40) });
 
         long id;
         long syncedBeforeRestart;

@@ -10,8 +10,8 @@
 | M2 | 界面测试基建（Avalonia.Headless.XUnit） | 完成（随 M1 落地） | 2026-11-22 |
 | M3 | 引擎核心（单段 → 多段 → 续传） | 完成（等分切段；动态二分/接管/竞速转入 M6） | 2026-11-22 |
 | M4 | 接线（Manager + 进度上屏） | 完成（进度详情窗口待做） | 2026-11-22 |
-| M5 | 任务库与队列（SQLite） | 完成（并发压测待补） | 2026-11-22 |
-| M6 | 打磨（限速/代理/通知/可选切 SimdAIO） | 未开始 | — |
+| M5 | 任务库与队列（PureDb） | 完成（并发压测待补） | 2026-11-22 |
+| M6 | 打磨（限速/代理/通知/可选切 SimdAIO） | 进行中（限速/代理/设置已完成；重试退避/通知/单实例/托盘待做） | — |
 
 状态取值：`未开始` / `进行中` / `完成` / `阻塞`（阻塞须在日志里写明原因）。
 
@@ -32,6 +32,26 @@
 ## 日志
 
 > 每次提交/里程碑收尾追加一条，倒序（最新在上）。
+
+### 2026-11-22 · 存储引擎 SQLite → PureDb
+
+- 依赖：`Directory.Packages.props` 去掉 `Microsoft.Data.Sqlite 10.0.15`，改 `PureDb 1.0.0-rc.1`
+  （`net10.0`，纯托管无原生依赖）。`Xdm.Core` / `Xdm.App` 的 `SqliteException` → `PureDb.SqlException`。
+- `Core/Tasks/TaskStore`：**全局单连接 + 全局锁**——构造时打开唯一一条 `PureDbConnection`
+  （`Data Source=<path>;Access=Shared`）并持有到 `Dispose`，所有公开方法在 `_gate` 内串行执行，
+  不再每方法新建连接（PureDb 无连接池，多连接各缓存页会读到旧数据）。去掉 WAL / `PRAGMA` /
+  `user_version`。方言限制按实测处理：段表加自增 `id` 列 + `(task_id, seg_id)` 唯一索引
+  （PureDb 不支持复合主键）；`Insert` 在事务内取 `MAX(id)+1` 显式写 id（无 `last_insert_rowid()`）；
+  冲突仅剩"另一个进程实例抢同一库"，仍由 `Run(...)` 退避重试 `DBConcurrencyException` 与
+  唯一索引冲突兜底；事务内命令显式挂 `DbCommand.Transaction`；`:memory:` 映射到
+  `%TEMP%\xdm-memory\` 临时文件，`Dispose` 时连同 `.lock` / `.pidx` 一起删除。
+- 保护：检测到旧 SQLite 文件头（`SQLite format 3\0`）时抛 `InvalidOperationException`，
+  提示备份后删除或改名，不尝试就地迁移。
+- 数据文件：`xdm.db` 旁变为 `.lock`（访问锁）+ `.pidx`（页索引），原 `-wal` / `-shm` 不再产生；
+  README / ARCHITECTURE §7.1 / PLAN 风险表已同步。
+- 测试：`TaskStoreTests` 的 WAL / `sqlite_master` 断言改为查表验证；Core 129 + Ui 51 = **180 全绿**；
+  `dotnet build` 0 警告 0 错误。冒烟：`--db %TEMP%\xdm-puredb-smoke\xdm.db` 首次生成
+  `xdm.db/.lock/.pidx`（文件头 `PUREDB01`），结束进程后二次启动正常。
 
 ### 2026-11-22 · M5 完成（SQLite 任务库 + 启动恢复）
 

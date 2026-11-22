@@ -52,7 +52,7 @@ C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
 - 定时任务、关机后动作（校验和校验会随 V2 的 LFS sha256 一起落地）
 - 多语言（先中文，字符串集中管理，后续可加）
 
-> 首期**不做不等于不管**：任务模型、数据来源接口、SQLite schema、UI 行模板都必须
+> 首期**不做不等于不管**：任务模型、数据来源接口、任务库 schema、UI 行模板都必须
 > 预留"多协议 / 多文件 / 带校验"的形状，约束见 `ARCHITECTURE.md` §12.1。
 
 ---
@@ -134,15 +134,15 @@ C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
 
 ### M5 任务库与队列（2–3 天）✔ 已完成（2026-11-22）
 
-- 库文件 `xdm.db` 固定放 **exe 同目录**（`AppContext.BaseDirectory`），WAL 模式，
+- 库文件 `xdm.db` 固定放 **exe 同目录**（`AppContext.BaseDirectory`），
   不可写时回退 `%LOCALAPPDATA%\Xdm\`（`ARCHITECTURE.md` §7.1）
-- SQLite 任务表（见 `ARCHITECTURE.md` §7）：**建表即带** `kind` / `parent_id` /
+- 任务表（见 `ARCHITECTURE.md` §7，存储引擎 2026-11-22 由 SQLite 改为 PureDb）：**建表即带** `kind` / `parent_id` /
   `content_sha256` / `source_meta_json`，首期写默认值，不留 ALTER 迁移
 - 启动恢复：未完成任务转暂停态、已完成后校验文件存在性
 - 暂停/恢复/删除（含 `.xdm-part` 清理）、重名策略、发布到目标目录的原子改名
 - 验收：杀进程后重启，任务列表与进度完整；发布过程断电不留半个文件
-- **实测（2026-11-22）**：`Core/Tasks/TaskStore`（WAL + `user_version=1` + tasks/segments
-  首建全字段）与 `DownloadManagerOptions.Store` 接线完成。写库时机为状态迁移 / 切分 /
+- **实测（2026-11-22）**：`Core/Tasks/TaskStore`（tasks/segments 首建全字段）与
+  `DownloadManagerOptions.Store` 接线完成。写库时机为状态迁移 / 切分 /
   每 30s 同步 / 完成失败，**不在每秒进度里写**；退出时做最后一次同步。
   恢复规则：`Queued/Connecting/Downloading` → `Paused`，`Completed` 校验目标文件存在否则 `Failed`；
   段与进度从库回填，快照缺失时用库里的段补写 `state/<id>.json`，恢复后可继续续传。
@@ -214,7 +214,7 @@ C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
 |---|---|---|
 | 大量进度条刷新导致掉帧（Skia 软件光栅 / 将来 SimdSkia） | 体验差 | 进度按 ≥1% 变化才更新；行内进度条用轻量自绘控件；M1 用 1000 行假数据压测 |
 | exe 目录不可写导致任务库建不出来（装在 `Program Files`） | 启动即失败 | 回退 `%LOCALAPPDATA%\Xdm\xdm.db` 并提示，不弹窗阻断（`ARCHITECTURE.md` §7.1） |
-| 用户只备份 `xdm.db`、漏掉 `-wal` / `-shm` | 丢最新进度 | 文档写明"三件一起拷"或先 `wal_checkpoint(TRUNCATE)` |
+| 用户只备份 `xdm.db`、漏掉 `.lock` / `.pidx` | 丢最新进度 | 文档写明"三件一起拷"（`ARCHITECTURE.md` §7.1） |
 | Avalonia 12 与 11 的 API 差异缺乏资料 | 试错成本 | 以本机包内 `Avalonia.xml`/源码为准，不照抄 11.x 示例 |
 | 并发分段状态机移植出错（暂停/取消/竞速竞态） | 静默损坏文件 | 保留阻塞线程模型；按 `TESTING.md` 矩阵逐条对齐；段级断言区间不重叠 |
 | 将来切 SimdAIO 时发现大量 Skia 直连代码 | 切换成本 | 现在就守 `ARCHITECTURE.md` §2.2 的约束；`Xdm.Ui` 不引启动栈 |

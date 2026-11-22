@@ -1,4 +1,4 @@
-using Microsoft.Data.Sqlite;
+using PureDb.AdoNet;
 using Xdm.Core.Downloads;
 using Xdm.Core.Errors;
 using Xdm.Core.Storage;
@@ -33,30 +33,22 @@ public sealed class TaskStoreTests : IDisposable
     }
 
     [Fact]
-    public void Open_CreatesSchemaInWalMode()
+    public void Open_CreatesSchemaAndAcceptsQueries()
     {
-        using var connection = new SqliteConnection($"Data Source={_store.DbPath}");
+        using var connection = new PureDbConnection($"Data Source={_store.DbPath};Access=Shared");
         connection.Open();
 
         using var command = connection.CreateCommand();
-        command.CommandText = "PRAGMA journal_mode;";
-        Assert.Equal("wal", (string?)command.ExecuteScalar());
+        command.CommandText = "SELECT COUNT(*) FROM tasks;";
+        Assert.Equal(0L, (long)command.ExecuteScalar()!);
 
-        command.CommandText = "PRAGMA user_version;";
-        Assert.Equal((long)TaskStore.SchemaVersion, command.ExecuteScalar());
+        command.CommandText = "SELECT COUNT(*) FROM segments;";
+        Assert.Equal(0L, (long)command.ExecuteScalar()!);
 
-        command.CommandText = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;";
-        var tables = new List<string>();
-        using (var reader = command.ExecuteReader())
-        {
-            while (reader.Read())
-            {
-                tables.Add(reader.GetString(0));
-            }
-        }
+        var id = _store.Insert(NewTask());
 
-        Assert.Contains("tasks", tables);
-        Assert.Contains("segments", tables);
+        command.CommandText = "SELECT id FROM tasks;";
+        Assert.Equal(id, (long)command.ExecuteScalar()!);
     }
 
     [Fact]

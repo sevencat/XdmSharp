@@ -48,7 +48,7 @@ Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传）�
 | Avalonia.Themes.Fluent | `12.1.6` | 仅测试 | `Xdm.Ui.Tests` 的 Headless 宿主用；**App 不能引** |
 | Avalonia.Headless.XUnit | `12.1.6` | ✔ | 界面测试（只进 `Xdm.Ui.Tests`） |
 | xunit.v3 | `3.2.2` | ✔ | 与 Headless.XUnit 的依赖版本一致 |
-| Microsoft.Data.Sqlite | `10.0.15` | ✔ | 任务库 |
+| PureDb | `1.0.0-rc.1` | ✔ | 任务库（纯托管嵌入式，无原生依赖；仅 net10.0） |
 
 以上版本本机 NuGet 缓存（`E:\program\nuget\cache`）均已存在，可离线还原。
 
@@ -58,7 +58,7 @@ Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传）�
 
 | 文件 | 位置 | 说明 |
 |---|---|---|
-| `xdm.db` | `AppContext.BaseDirectory\xdm.db` | SQLite 任务库；WAL 模式，旁边会同时有 `xdm.db-wal` / `xdm.db-shm`，备份要三件一起 |
+| `xdm.db` | `AppContext.BaseDirectory\xdm.db` | PureDb 任务库；旁边有 `xdm.db.lock`（访问锁），写入量上去后还会生成 `xdm.db.pidx`（页索引），备份/迁移要一起拷 |
 | `state/<id>.json` | 同目录 `state/` | 分段进度快照（见 `ARCHITECTURE.md` §7.2） |
 | `.<id>.xdm-part` | 任务的目标目录 | 未完成的临时文件（点前缀 + `.xdm-part`，与参考实现一致），发布时原子改名 |
 
@@ -94,7 +94,7 @@ src/
     Storage/FileNaming.cs      Content-Disposition / URL → 文件名，非法字符与重名
     Storage/NameConflictPolicy.cs 发布重名策略（自动改名 / 覆盖 / 失败）
     Storage/SegmentVerifier.cs SHA256 校验挂点（V2 LFS / V3 piece）
-    Tasks/TaskStore.cs         SQLite 任务库（WAL、建表、CRUD、启动恢复）
+    Tasks/TaskStore.cs         PureDb 任务库（建表、CRUD、启动恢复）
     Tasks/StoredTask.cs        任务行 DTO（含 kind/parent_id/段快照等预留字段）
     Scheduling/DownloadQueue.cs FIFO 待启动队列（并发闸门在管理器）
     Downloads/DownloadEngine.cs  探测 → 等分建段 → 段线程 → 发布；暂停/恢复/删除

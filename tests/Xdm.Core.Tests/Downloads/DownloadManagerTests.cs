@@ -197,7 +197,12 @@ public class DownloadManagerTests
     {
         using var harness = new EngineHarness();
         using var manager = CreateManager(harness);
-        harness.Server.AddFile("/progress.bin", EngineHarness.MakeBytes(512 * 1024, seed: 6), Slow);
+
+        // 必须跑够两个以上的进度周期，否则第一帧（速度为 0）之后就直接完成，没有 SpeedBps>0 的样本。
+        harness.Server.AddFile(
+            "/progress.bin",
+            EngineHarness.MakeBytes(2 * 1024 * 1024, seed: 6),
+            new FileBehavior { ChunkSize = 16 * 1024, PerChunkDelay = TimeSpan.FromMilliseconds(20) });
 
         var updates = new ConcurrentQueue<DownloadRecord>();
         manager.TaskUpdated += updates.Enqueue;

@@ -123,7 +123,7 @@ public sealed class AppSettings
 
             var key = name?.Trim();
             var text = value?.Trim();
-            if (string.IsNullOrEmpty(key) || text is null || !IsHeaderName(key) || text.Contains('\r') || text.Contains('\n'))
+            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(text) || !IsHeaderName(key) || text.Contains('\r') || text.Contains('\n'))
             {
                 continue;
             }

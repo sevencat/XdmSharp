@@ -101,7 +101,7 @@ public sealed class FileBehavior
 | `TestPositionalOutput.kt` (292) | `PartFileTests.cs` | 偏移写、越界断言、未知长度增长 | 已落地 |
 | `TestHttpPartAllocation.kt` (309) | `PartAllocationTests.cs` | 无稀疏文件预填充 | M6 |
 | `TestLocalStorage.kt` (126) / `TestAtomicIO.kt` (127) | `AtomicJsonTests.cs` | 原子写、临时文件不残留、损坏快照读回 `null` | 已落地（断电模拟未做） |
-| `TestTaskInfoDB.kt` (311) | `TaskStoreTests.cs` | SQLite 增删改查、启动恢复 | M5 |
+| `TestTaskInfoDB.kt` (311) | `TaskStoreTests.cs` | PureDb 增删改查、启动恢复 | M5 |
 | `TestFileMove.kt` (311) | `PublishTests.cs` | 发布、重名三策略、跨盘 | 发布 + 重名已落地，跨盘/三策略 → M5 |
 | `TestDispositionFileName.kt` (62) | `FileNamingTests.cs` | `Content-Disposition` / RFC5987 / 非法字符 / 保留名 / 重名 | 已落地 |
 

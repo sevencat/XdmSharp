@@ -23,7 +23,7 @@ Xdm.App (WinExe)                        ← 只做组装：启动链、DI、窗�
 
 | 工程 | OutputType | TFM | 包引用 |
 |---|---|---|---|
-| `Xdm.Core` | Library | net10.0 | Microsoft.Data.Sqlite |
+| `Xdm.Core` | Library | net10.0 | PureDb |
 | `Xdm.Ui` | Library | net10.0 | Avalonia |
 | `Xdm.App` | WinExe | net10.0 | Avalonia, Sevencat.Avalonia.SimdAIO, →Ui, →Core |
 | `Xdm.Core.Tests` | Exe（xunit v3） | net10.0 | xunit.v3, xunit.runner.visualstudio, Microsoft.NET.Test.Sdk, →Core |
@@ -157,7 +157,7 @@ src/Xdm.Core/                       命名空间根 Xdm.Core
     SpeedLimiter.cs                 令牌桶限速（全局）
     RetryPolicy.cs                  指数退避 + 重试预算
   Tasks/
-    TaskStore.cs                    SQLite 持久化
+    TaskStore.cs                    PureDb 持久化
     DownloadRecord.cs               列表行数据（供 Ui 只读消费）
   Errors/
     DownloadError.cs                错误枚举 + 中文文案
@@ -294,29 +294,39 @@ UI 线程 (Dispatcher)              引擎
 
 ## 7. 持久化
 
-### 7.1 SQLite（任务库）
+### 7.1 PureDb（任务库）
 
 **位置：`AppContext.BaseDirectory\xdm.db`** —— 与 exe 同目录（绿色版语义：目录即数据，拷走就能走）。
 
 ```csharp
 // Xdm.Core/Tasks/TaskStore.cs
-public static string DefaultDbPath =>
-    Path.Combine(AppContext.BaseDirectory, "xdm.db");
-
-// 连接串走 SqliteConnectionStringBuilder：
-//   DataSource = DefaultDbPath
-//   Mode       = ReadWriteCreate
-//   Pooling    = true
-//   DefaultTimeout = 10
+// 全局只保一条连接（构造时打开、Dispose 时关闭），所有公开方法在 _gate 锁内串行使用：
+//   Data Source=<db 绝对路径>;Access=Shared
 ```
+
+**不做多连接**：PureDb 没有连接池，多条连接各自缓存页，容易读到未合并的旧数据；因此
+`TaskStore` 自己持有唯一 `PureDbConnection`，读写全部走 `lock (_gate)`，方法之间自然排队。
+外部进程仍可用 `Access=Shared` 打开同一库，跨进程争用由乐观事务 + `Run` 重试兜底。
+
+PureDb 是纯托管嵌入式库（`net10.0`，无原生依赖），SQL 方言是 SQLite 的子集，因此有几条硬约束：
+
+- 表必须有且只有一个 `INTEGER PRIMARY KEY`；不支持复合主键 → 段表多一个自增 `id` 列，
+  `(task_id, seg_id)` 的唯一性由 `CREATE UNIQUE INDEX` 保证。
+- 没有 `PRAGMA`，也没有 `last_insert_rowid()`：`Insert` 在事务内取 `MAX(id)+1` 显式写入 id。
+- 事务是乐观 Serializable，冲突抛 `DBConcurrencyException`；写路径统一走
+  `Run(...)`（最多 6 次退避重试），唯一索引冲突（`SqlException` 含 `UNIQUE`）同样重试。
+- 事务内的每条命令必须显式设置 `DbCommand.Transaction`，否则直接抛 `InvalidOperationException`。
+- 外键与 `ON DELETE CASCADE` 由引擎执行（测试已覆盖）；删除任务仍显式删段，不依赖级联开关。
 
 约束：
 
-- `xdm.db` 旁边还会有 `xdm.db-wal`、`xdm.db-shm`（WAL 模式），**备份/迁移必须三件一起拷**，
-  或先执行 `PRAGMA wal_checkpoint(TRUNCATE)` 再拷；只拷 `.db` 会丢最新事务。
+- `xdm.db` 旁边有 `xdm.db.lock`（跨进程访问锁），写入量上去后还会生成 `xdm.db.pidx`（页索引），
+  **备份/迁移要一起拷**，只拷 `.db` 会丢数据。
 - 目录**不可写**时（装在 `Program Files`、或 exe 在只读介质）→ 回退
   `%LOCALAPPDATA%\Xdm\xdm.db`，并在状态栏/日志提示"任务库已回退到用户目录"。
-  判定方式：启动时试着建库，捕获 `SqliteException`/`UnauthorizedAccessException` 后降级，不弹窗阻断。
+  判定方式：启动时试着建库，捕获 `SqlException`/`UnauthorizedAccessException` 后降级，不弹窗阻断。
+- 旧版是 SQLite 库（文件头 `SQLite format 3\0`）。`TaskStore` 打开前会检测并抛出
+  `InvalidOperationException`，提示备份后删除/改名，不尝试就地迁移。
 - 库文件路径解析（`AppPaths.DbPath`，优先级从高到低）：
 
   | # | 来源 | 结果 |
@@ -334,60 +344,62 @@ public static string DefaultDbPath =>
   （不猜、不静默回退到默认路径，否则用户会对着错误的库排查）。
 - 解析位置：**`Xdm.App` 负责读命令行**，解析出 `AppPaths` 后注入 `TaskStore` / 引擎；
   `Xdm.Core` 不得调用 `Environment.GetCommandLineArgs()`（测试要能直接构造 `new AppPaths(dbPath)`）。
-- 单实例：不同 `--db` 视为不同实例，允许并存；同一库被第二个实例打开时 WAL 仍可用，
+- 单实例：不同 `--db` 视为不同实例，允许并存；`Access=Shared` 让同一库的第二个实例仍能打开，
   但"暂停/删除"会互相干扰 → M6 再定单实例锁，首期只在日志里警告。
 - `Xdm.Ui.Tests` / `Xdm.Core.Tests` 一律用 `:memory:` 或临时目录下的随机文件名，
   **禁止**写到 exe 目录（否则并发测试互相踩库，且污染构建产物）。
-- 发布时不要打包任何预置 `xdm.db`；首次运行自动建表（`CREATE TABLE IF NOT EXISTS` + `user_version` 记版本）。
+  `:memory:` 由 `TaskStore` 映射成 `%TEMP%\xdm-memory\` 下的临时文件，`Dispose` 时删除。
+- 发布时不要打包任何预置 `xdm.db`；首次运行自动建表（`CREATE TABLE IF NOT EXISTS`）。
 
 ```sql
-PRAGMA journal_mode=WAL;
-
-CREATE TABLE tasks (
-  id              INTEGER PRIMARY KEY,
-  kind            INTEGER NOT NULL DEFAULT 0,   -- 0 Http 1 HuggingFace 2 Torrent（V2/V3）
-  parent_id       INTEGER REFERENCES tasks(id) ON DELETE CASCADE,  -- 两级任务：模型包 → 文件
-  url             TEXT    NOT NULL,
-  file_name       TEXT    NOT NULL,
-  target_folder   TEXT    NOT NULL,
-  temp_folder     TEXT    NOT NULL,
-  total_size      INTEGER,
-  downloaded      INTEGER NOT NULL DEFAULT 0,   -- 只记 Synced 之和
-  status          INTEGER NOT NULL,             -- 0 Ready 1 Downloading 2 Paused 4 Finished 5 Failed
-  max_segments    INTEGER NOT NULL,
-  headers_json    TEXT,
-  cookie          TEXT,
-  validator       TEXT,                         -- If-Range: Last-Modified 原样串
+-- 段表必须有 INTEGER PRIMARY KEY，复合唯一性用索引表达
+CREATE TABLE IF NOT EXISTS tasks (
+  id               INTEGER PRIMARY KEY,
+  kind             INTEGER NOT NULL DEFAULT 0,   -- 0 Http 1 HuggingFace 2 Torrent（V2/V3，首期为 0）
+  parent_id        INTEGER,                      -- 两级任务：模型包 → 文件（首期 NULL）
+  url              TEXT    NOT NULL,
+  file_name        TEXT    NOT NULL,
+  target_folder    TEXT    NOT NULL,
+  temp_folder      TEXT    NOT NULL,
+  total_size       INTEGER,
+  downloaded       INTEGER NOT NULL DEFAULT 0,   -- 只记 Synced 之和
+  status           INTEGER NOT NULL,             -- 0 Queued 1 Active 2 Paused 4 Finished 5 Failed
+  max_segments     INTEGER NOT NULL,
+  headers_json     TEXT,
+  cookie           TEXT,
+  validator        TEXT,                         -- If-Range: Last-Modified 原样串
   no_range_support INTEGER NOT NULL DEFAULT 0,
-  content_sha256  TEXT,                         -- V2：LFS sha256 / V3：整体校验（可空）
-  source_meta_json TEXT,                        -- V2：repo/revision/path；V3：infohash。首期为 NULL
-  error_code      INTEGER,                      -- DownloadError；5 且为 Disk 时恢复成 DiskError
-  category_id     INTEGER,
-  name_policy     INTEGER NOT NULL DEFAULT 0,   -- 0 Rename（默认）1 Overwrite 2 Fail
-  created_at      INTEGER NOT NULL,
-  finished_at     INTEGER
+  content_sha256   TEXT,                         -- V2：LFS sha256 / V3：整体校验（可空）
+  source_meta_json TEXT,                         -- V2：repo/revision/path；V3：infohash。首期为 NULL
+  error_code       INTEGER,                      -- DownloadError；5 且为 Disk 时恢复成 DiskError
+  name_policy      INTEGER NOT NULL DEFAULT 0,   -- 0 Rename（默认）1 Overwrite 2 Fail
+  created_at       INTEGER NOT NULL,
+  finished_at      INTEGER
 );
 
-CREATE TABLE segments (
-  task_id   INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  seg_id    INTEGER NOT NULL,
-  offset    INTEGER NOT NULL,
-  length    INTEGER NOT NULL,
-  synced    INTEGER NOT NULL,
-  status    INTEGER NOT NULL,
-  PRIMARY KEY (task_id, seg_id)
+CREATE TABLE IF NOT EXISTS segments (
+  id      INTEGER PRIMARY KEY,
+  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  seg_id  INTEGER NOT NULL,
+  offset  INTEGER NOT NULL,
+  length  INTEGER NOT NULL,
+  synced  INTEGER NOT NULL,
+  status  INTEGER NOT NULL
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_segments_task_seg ON segments(task_id, seg_id);
 ```
 
-- 启动：`status=Queued/Downloading` 的记录一律改 `Paused`（进程被杀残留）；`Finished` 的校验目标文件，
+- 启动：`status=Queued/Active` 的记录一律改 `Paused`（进程被杀残留）；`Finished` 的校验目标文件，
   不存在则降级 `Failed`。
 - 写库时机：状态迁移、切分、每 30s 同步、完成/失败。**不在每秒进度里写库**。
+  完成路径**先落库再对外报 `Completed`**，避免"UI 已完成、库里还是下载中"的窗口被进程退出放大。
 - 当前实现：`temp_folder` 与 `target_folder` 相同（`.xdm-part` 就在目标目录，发布是同目录 `File.Move`）；
   `name_policy` 是首版就带的列（重名策略），不靠 `ALTER` 迁移。
 - 参考实现用自定义 tagged 二进制（`task-<id>.info`、`<id>.state`、`active/paused/finished-downloads.dat`），
-  这里**不照搬**：SQLite 更适合后续加分类/搜索/历史。
+  这里**不照搬**：带 SQL 的关系库更适合后续加分类/搜索/历史。
 
-### 7.2 状态文件 `state/<id>.json`（进度，独立于 SQLite）
+### 7.2 状态文件 `state/<id>.json`（进度，独立于任务库）
 
 目录基准与任务库一致：`<AppContext.BaseDirectory>\state\`（与 `xdm.db` 同级，回退时一起回退到
 `%LOCALAPPDATA%\Xdm\state\`）。这样把整个程序目录拷走 = 连未完成任务一起带走。
@@ -483,7 +495,7 @@ src/Xdm.Ui/                          命名空间根 Xdm.Ui
 | `storage/Storage.kt` + `NioFileOps.kt` (455) | `Xdm.Core/Storage/PartFile.cs` | 用 `SafeFileHandle` + `RandomAccess` 重写，代码量减半 |
 | `util/AtomicIO.kt` (132) | `Xdm.Core/Storage/AtomicJson.cs` | 用 `File.Move(overwrite)` |
 | `network/http/impl/HttpClientImpl.kt` (376) | `Xdm.Core/Http/RangeHttpClient.cs` | `SocketsHttpHandler` 重写：手动跟重定向（记 FinalUrl）、`MaxConnectionsPerServer`、逐次读超时 |
-| `downloaders/TaskInfoDB.kt` | `Xdm.Core/Tasks/TaskStore.cs` | 改 SQLite |
+| `downloaders/TaskInfoDB.kt` | `Xdm.Core/Tasks/TaskStore.cs` | 改 PureDb |
 | `xdm-manager/DownloadManager.kt` (2300) | `Xdm.App/DownloadManager.cs` + `Xdm.Core/Scheduling/DownloadQueue.cs` | 只取 HTTP 相关：队列、并发、发布、事件 |
 | `xdm-app/ui/**` (68 文件) | `Xdm.Ui/**` | 重新设计，见 `UI-DESIGN.md` |
 

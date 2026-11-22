@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using Microsoft.Data.Sqlite;
+using PureDb;
 using Xdm.Core.Errors;
 using Xdm.Core.Http;
 using Xdm.Core.Scheduling;
@@ -167,7 +167,7 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         var initialStatus = request.StartImmediately ? DownloadStatus.Queued : DownloadStatus.Paused;
         var headers = MergeHeaders(DefaultHeaders, request.Headers);
 
-        // 有任务库时 id 由 SQLite 分配（重启后不会复用旧 id）；否则进程内自增。
+        // 有任务库时 id 由任务库分配（重启后不会复用旧 id）；否则进程内自增。
         long id;
         if (_store is { } store)
         {
@@ -468,10 +468,11 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         {
             // 重名策略可能改过文件名：库里记实际落盘名，重启后才能校验文件存在。
             TryStore(store => store.Rename(id, Path.GetFileName(finalPath)));
-            PersistSnapshot(entry, error: null);
+            PersistCompleted(entry);
         }
 
-        Publish(id);
+        // 不在这里发布：调用方随后会 ChangeStatus(Completed)，由那次发布带上正确状态，
+        // 避免 UI 先收到一帧仍是 Downloading 的记录。
     }
 
     void IDownloadObserver.OnFailed(long id, DownloadError error, string detail)
@@ -722,7 +723,7 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                 }
             }
         }
-        catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is SqlException or IOException or UnauthorizedAccessException)
         {
             PersistenceError = ex.Message;
             Debug.WriteLine($"[xdm] 任务库恢复失败：{ex}");
@@ -781,6 +782,23 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         TryStore(store => store.ReplaceSegments(task.Id, segments, task.SyncedTotal, task.TotalSize));
     }
 
+    /// <summary>
+    /// 完成态落库：显式写 <see cref="DownloadStatus.Completed"/> 与终态文件名。
+    /// 不依赖 <c>task.Status</c>（引擎在 <c>OnCompleted</c> 之后才切状态），
+    /// 且"已下载 = 总长"由引擎完成前校验保证。
+    /// </summary>
+    private void PersistCompleted(Entry entry)
+    {
+        var task = entry.Task;
+        var segments = task.Snapshot().Select(ToState).ToArray();
+        var downloaded = task.TotalSize ?? task.SyncedTotal;
+        TryStore(store =>
+        {
+            store.UpdateStatus(task.Id, DownloadStatus.Completed, null, entry.CompletedAt ?? DateTimeOffset.Now);
+            store.ReplaceSegments(task.Id, segments, downloaded, task.TotalSize);
+        });
+    }
+
     private void PersistSnapshot(Entry entry, DownloadError? error)
     {
         var task = entry.Task;
@@ -809,7 +827,7 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
             action(_store);
             PersistenceError = null;
         }
-        catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or InvalidOperationException)
+        catch (Exception ex) when (ex is SqlException or IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             // 落库失败不能影响下载线程；暴露在 PersistenceError 里供界面/测试排查。
             PersistenceError = ex.Message;

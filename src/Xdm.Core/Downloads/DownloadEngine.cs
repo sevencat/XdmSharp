@@ -617,8 +617,10 @@ public sealed class DownloadEngine : IDisposable
             File.Move(task.PartPath, finalPath, overwrite: task.NamePolicy == NameConflictPolicy.Overwrite);
             AtomicJson.Delete(StatePath(task));
 
-            ChangeStatus(task, DownloadStatus.Completed);
+            // 先落库再对外报完成：否则 UI 已经显示"已完成"、库里还是 Downloading，
+            // 此刻进程被杀，重启会把这个已完成任务恢复成暂停。
             _observer?.OnCompleted(task.Id, finalPath);
+            ChangeStatus(task, DownloadStatus.Completed);
             task.Completion.TrySetResult(new DownloadResult(true, finalPath, DownloadError.None, null));
             _runtimes.TryRemove(task.Id, out _);
         }

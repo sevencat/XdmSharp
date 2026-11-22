@@ -5,7 +5,7 @@ using Xdm.Core.Storage;
 namespace Xdm.Core.Tasks;
 
 /// <summary>
-/// 任务表的一行（<c>ARCHITECTURE.md</c> §7.1）。插入时 <see cref="Id"/> 忽略，由 SQLite 分配。
+/// 任务表的一行（<c>ARCHITECTURE.md</c> §7.1）。插入时 <see cref="Id"/> 忽略，由任务库分配。
 /// </summary>
 public sealed record StoredTask
 {

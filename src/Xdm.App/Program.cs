@@ -1,5 +1,5 @@
 using Avalonia;
-using Microsoft.Data.Sqlite;
+using PureDb;
 using SimdSkia.Avalonia;
 using Xdm.Core.Configuration;
 using Xdm.Core.Tasks;
@@ -30,7 +30,7 @@ internal static class Program
             {
                 Startup.Store = new TaskStore(Startup.Paths.DbPath);
             }
-            catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or InvalidOperationException)
+            catch (Exception ex) when (ex is SqlException or IOException or UnauthorizedAccessException or InvalidOperationException)
             {
                 // 库不可用时宁可显式失败，也不静默丢失任务列表。
                 Console.Error.WriteLine($"任务库不可用：{Startup.Paths.DbPath}{Environment.NewLine}{ex.Message}");
