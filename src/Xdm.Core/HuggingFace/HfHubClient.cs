@@ -74,8 +74,8 @@ public sealed class HfHubClient : IDisposable
     /// <summary>
     /// 按关键字搜模型：<c>GET {endpoint}/api/models?search=…&amp;sort=downloads&amp;direction=-1</c>。
     /// 关键字就是用户输入（可以是模型 id 片段）；按下载量降序，便于挑官方/热门版本。
-    /// 空格/逗号分隔的多个关键字各查一次再按 id 取交集（HF 的 <c>search</c> 只认单个串，
-    /// 「同时包含」只能客户端拼）。
+    /// Hub 的 <c>search</c> 是全文检索，空格分开的多个词本来就是「同时包含」（AND），
+    /// 一次请求即可；只有逗号它不认，得先换成空格（见 <see cref="SplitKeywords"/>）。
     /// </summary>
     public async Task<IReadOnlyList<HfModelSummary>> SearchModelsAsync(
         string? endpoint,
@@ -84,35 +84,29 @@ public sealed class HfHubClient : IDisposable
         int limit = 20,
         CancellationToken cancellationToken = default)
     {
-        var keywords = SplitKeywords(query);
-        if (keywords.Count == 0)
+        // 拆分只为把逗号/分号统一成空格 + 去空去重；「同时包含」（AND）是 Hub 自己做的。
+        var keyword = string.Join(' ', SplitKeywords(query));
+        if (keyword.Length == 0)
         {
             return [];
         }
 
-        var merged = await SearchOneAsync(endpoint, keywords[0], token, limit, cancellationToken)
-            .ConfigureAwait(false);
-
-        // 交集只可能越查越小：中间空掉就不用再发后面的请求了。
-        for (var i = 1; i < keywords.Count && merged.Count > 0; i++)
-        {
-            var page = await SearchOneAsync(endpoint, keywords[i], token, limit, cancellationToken)
-                .ConfigureAwait(false);
-            merged = Intersect(merged, page);
-        }
-
-        return merged;
+        var url = SearchUrl(endpoint, keyword, limit);
+        using var response = await SendAsync(url, token, cancellationToken).ConfigureAwait(false);
+        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        return ParseSearchPage(json);
     }
 
-    /// <summary>一次搜索最多识别的关键字个数（每个关键字一条请求，别把连接池占满）。</summary>
-    public const int MaxKeywords = 5;
+    /// <summary>最多识别的关键字个数（纯防手滑，Hub 自己对词数没有限制）。</summary>
+    public const int MaxKeywords = 10;
 
     /// <summary>关键字分隔符：空白（含制表/换行）、中英文逗号与分号。</summary>
     private static readonly char[] KeywordSeparators = [' ', '\t', '\r', '\n', ',', '，', ';', '；'];
 
     /// <summary>
     /// 把输入拆成关键字：按空白 / 逗号 / 分号分隔，去空、忽略大小写去重，最多 <see cref="MaxKeywords"/> 个。
-    /// 只有一个关键字时等价于以前的「整串当关键字」。
+    /// Hub 的 <c>search</c> 是全文检索，空格分开的词是 AND，但**不认逗号**（<c>qwen,7b</c> 回 0 条），
+    /// 所以调用方拿这些关键字用空格重新拼起来发。
     /// </summary>
     public static IReadOnlyList<string> SplitKeywords(string? query)
     {
@@ -138,60 +132,6 @@ public sealed class HfHubClient : IDisposable
 
         return keywords;
     }
-
-    /// <summary>单个关键字的一次搜索（就是 <c>/api/models?search=…</c> 那一页）。</summary>
-    private async Task<IReadOnlyList<HfModelSummary>> SearchOneAsync(
-        string? endpoint,
-        string keyword,
-        string? token,
-        int limit,
-        CancellationToken cancellationToken)
-    {
-        var url = SearchUrl(endpoint, keyword, limit);
-        using var response = await SendAsync(url, token, cancellationToken).ConfigureAwait(false);
-        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        return ParseSearchPage(json);
-    }
-
-    /// <summary>按 id 求交集（大小写不敏感），统计量取两边的较大值，结果仍按下载量降序。</summary>
-    private static List<HfModelSummary> Intersect(
-        IReadOnlyList<HfModelSummary> left,
-        IReadOnlyList<HfModelSummary> right)
-    {
-        var byId = new Dictionary<string, HfModelSummary>(StringComparer.OrdinalIgnoreCase);
-        foreach (var model in right)
-        {
-            byId[model.Id] = model;
-        }
-
-        List<HfModelSummary> overlap = [];
-        foreach (var model in left)
-        {
-            if (!byId.TryGetValue(model.Id, out var other))
-            {
-                continue;
-            }
-
-            overlap.Add(new HfModelSummary
-            {
-                Id = model.Id,
-                Downloads = MaxOf(model.Downloads, other.Downloads),
-                Likes = MaxOf(model.Likes, other.Likes),
-                PipelineTag = model.PipelineTag ?? other.PipelineTag,
-            });
-        }
-
-        overlap.Sort(static (a, b) => (b.Downloads ?? -1).CompareTo(a.Downloads ?? -1));
-        return overlap;
-    }
-
-    /// <summary>两边的计数取大值；缺失一侧就用另一侧（原样保持 <see langword="null"/>）。</summary>
-    private static long? MaxOf(long? left, long? right) => (left, right) switch
-    {
-        ({ } l, { } r) => Math.Max(l, r),
-        ({ } l, null) => l,
-        _ => right,
-    };
 
     /// <summary>搜索地址（独立出来便于断言查询串）。<paramref name="limit"/> 夹到 [1, 100]。</summary>
     public static string SearchUrl(string? endpoint, string query, int limit = 20)

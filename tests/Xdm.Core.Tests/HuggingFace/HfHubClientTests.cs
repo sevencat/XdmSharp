@@ -193,7 +193,7 @@ public sealed class HfHubClientTests
         Assert.Empty(server.Requests);
     }
 
-    // ── 多关键字（空格/逗号分隔 → 各查一次再取交集）────────────────────────
+    // ── 多关键字（Hub 自己按 AND 全文检索，逗号由客户端换成空格）────────────
 
     [Fact]
     public void SplitKeywords_SplitsOnSpacesAndCommas_AndDedupesIgnoringCase()
@@ -206,10 +206,10 @@ public sealed class HfHubClientTests
     [Fact]
     public void SplitKeywords_CapsAtMaxKeywords()
     {
-        var keywords = HfHubClient.SplitKeywords("a b c d e f g");
+        var keywords = HfHubClient.SplitKeywords("a b c d e f g h i j k l");
 
         Assert.Equal(HfHubClient.MaxKeywords, keywords.Count);
-        Assert.Equal(["a", "b", "c", "d", "e"], keywords);
+        Assert.Equal("j", keywords[^1]);
     }
 
     [Theory]
@@ -222,44 +222,32 @@ public sealed class HfHubClientTests
     }
 
     [Fact]
-    public async Task SearchModels_MultipleKeywords_IntersectsById_AndKeepsLargerCounts()
+    public async Task SearchModels_MultipleKeywords_SendsOneSpaceJoinedRequest()
     {
         using var server = new FakeHttpServer();
+        // 只有「逗号换成空格」后的查询串才命中这条注册（Hub 不认逗号：qwen,7b 回 0 条）。
         server.AddText(
-            "/api/models?search=qwen&limit=20&sort=downloads&direction=-1",
-            """
-            [{ "id": "Qwen/Qwen2.5-7B-Instruct", "downloads": 900, "likes": 3 },
-             { "id": "Qwen/Qwen2.5-1.5B", "downloads": 800 }]
-            """);
-        server.AddText(
-            "/api/models?search=7b&limit=20&sort=downloads&direction=-1",
-            """
-            [{ "id": "Qwen/Qwen2.5-7B-Instruct", "downloads": 950, "likes": 10 },
-             { "id": "other/Llama-7B", "downloads": 990 }]
-            """);
+            "/api/models?search=qwen%207b&limit=20&sort=downloads&direction=-1",
+            """[{ "id": "Qwen/Qwen2.5-7B-Instruct", "downloads": 950, "likes": 10 }]""");
         using var client = new HfHubClient();
 
-        var models = await client.SearchModelsAsync(server.BaseUrl, "qwen, 7b", null, 20, Ct);
+        var models = await client.SearchModelsAsync(server.BaseUrl, "qwen，7b", null, 20, Ct);
 
-        var model = Assert.Single(models);
-        Assert.Equal("Qwen/Qwen2.5-7B-Instruct", model.Id);
-        Assert.Equal(950, model.Downloads);
-        Assert.Equal(10, model.Likes);
-        Assert.Equal(2, server.Requests.Count);
+        Assert.Equal("Qwen/Qwen2.5-7B-Instruct", Assert.Single(models).Id);
+        // AND 由 Hub 自己做：一个关键字一次请求，不按词拆成多次。
+        Assert.Single(server.Requests);
     }
 
     [Fact]
-    public async Task SearchModels_MultipleKeywords_StopsWhenFirstKeywordIsEmpty()
+    public async Task SearchModels_BlankAndSeparatorsOnly_SendsNothing()
     {
         using var server = new FakeHttpServer();
-        server.AddText("/api/models", "[]");
         using var client = new HfHubClient();
 
-        var models = await client.SearchModelsAsync(server.BaseUrl, "zzz yyy", null, 20, Ct);
+        var models = await client.SearchModelsAsync(server.BaseUrl, " , ，; ", null, 20, Ct);
 
-        // 交集只会越查越小：第一个关键字就没货，后面不用再打。
         Assert.Empty(models);
-        Assert.Single(server.Requests);
+        Assert.Empty(server.Requests);
     }
 
     [Fact]
