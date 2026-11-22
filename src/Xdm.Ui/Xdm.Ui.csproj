@@ -10,6 +10,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- 窗口图标 / 自绘标题栏 logo（由根目录 logo.png 处理而来：去白角、256px） -->
+    <AvaloniaResource Include="Assets\xdm-logo.png" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Xdm.Core\Xdm.Core.csproj" />
   </ItemGroup>
 

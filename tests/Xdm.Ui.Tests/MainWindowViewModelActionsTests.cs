@@ -15,7 +15,7 @@ public class MainWindowViewModelActionsTests
 
         public List<long> Resumed { get; } = [];
 
-        public List<long> Deleted { get; } = [];
+        public List<(long Id, bool DeleteFile)> Deleted { get; } = [];
 
         public void Start(IReadOnlyList<DownloadRequest> requests) => Started.Add(requests);
 
@@ -23,7 +23,7 @@ public class MainWindowViewModelActionsTests
 
         public void Resume(long id) => Resumed.Add(id);
 
-        public void Delete(long id) => Deleted.Add(id);
+        public void Delete(long id, bool deleteFile) => Deleted.Add((id, deleteFile));
     }
 
     private static DownloadRecord Record(long id, DownloadStatus status, string name) => new()
@@ -91,15 +91,45 @@ public class MainWindowViewModelActionsTests
     }
 
     [Fact]
-    public void Delete_ForwardsThenRemovesRow()
+    public async Task Delete_ForwardsThenRemovesRow()
     {
         var (vm, actions) = Create();
         var row = vm.Rows.First(r => r.Id == 1);
 
-        vm.Delete(row);
+        await vm.DeleteAsync(row);
 
-        Assert.Equal([1], actions.Deleted);
+        var call = Assert.Single(actions.Deleted);
+        Assert.Equal(1, call.Id);
+        Assert.False(call.DeleteFile);
         Assert.DoesNotContain(vm.Rows, r => r.Id == 1);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_WhenConfirmCancelled_KeepsRowAndForwardsNothing()
+    {
+        var (vm, actions) = Create();
+        vm.ConfirmDelete = _ => Task.FromResult<bool?>(null);
+        var row = vm.Rows.First(r => r.Id == 1);
+
+        await vm.DeleteAsync(row);
+
+        Assert.Empty(actions.Deleted);
+        Assert.Contains(vm.Rows, r => r.Id == 1);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_WhenOptionChecked_ForwardsDeleteFile()
+    {
+        var (vm, actions) = Create();
+        vm.ConfirmDelete = _ => Task.FromResult<bool?>(true);
+        var row = vm.Rows.First(r => r.Id == 2);
+
+        await vm.DeleteAsync(row);
+
+        var call = Assert.Single(actions.Deleted);
+        Assert.Equal(2, call.Id);
+        Assert.True(call.DeleteFile);
+        Assert.DoesNotContain(vm.Rows, r => r.Id == 2);
     }
 
     [Fact]

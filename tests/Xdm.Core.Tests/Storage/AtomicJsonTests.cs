@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization.Metadata;
 using Xdm.Core.Downloads;
 using Xdm.Core.Storage;
 
@@ -6,6 +7,9 @@ namespace Xdm.Core.Tests.Storage;
 public class AtomicJsonTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "xdm-json-tests", Guid.NewGuid().ToString("N"));
+
+    /// <summary>source-generated 元数据（AOT 下没有反射序列化，必须显式给 typeInfo）。</summary>
+    private static readonly JsonTypeInfo<DownloadState> StateJson = XdmJsonContext.Default.DownloadState;
 
     public AtomicJsonTests() => Directory.CreateDirectory(_root);
 
@@ -39,8 +43,8 @@ public class AtomicJsonTests : IDisposable
             ],
         };
 
-        AtomicJson.Write(path, state);
-        var loaded = AtomicJson.Read<DownloadState>(path);
+        AtomicJson.Write(path, state, StateJson);
+        var loaded = AtomicJson.Read(path, StateJson);
 
         Assert.NotNull(loaded);
         Assert.Equal(4096, loaded!.TotalSize);
@@ -54,21 +58,21 @@ public class AtomicJsonTests : IDisposable
     public void Write_ReplacesExistingFileWithoutTempLeftovers()
     {
         var path = Path.Combine(_root, "1.json");
-        AtomicJson.Write(path, new DownloadState { Id = 1, FileName = "old" });
-        AtomicJson.Write(path, new DownloadState { Id = 1, FileName = "new" });
+        AtomicJson.Write(path, new DownloadState { Id = 1, FileName = "old" }, StateJson);
+        AtomicJson.Write(path, new DownloadState { Id = 1, FileName = "new" }, StateJson);
 
-        Assert.Equal("new", AtomicJson.Read<DownloadState>(path)!.FileName);
+        Assert.Equal("new", AtomicJson.Read(path, StateJson)!.FileName);
         Assert.False(File.Exists(path + ".tmp"));
     }
 
     [Fact]
     public void Read_ReturnsNull_ForMissingOrCorruptFile()
     {
-        Assert.Null(AtomicJson.Read<DownloadState>(Path.Combine(_root, "missing.json")));
+        Assert.Null(AtomicJson.Read(Path.Combine(_root, "missing.json"), StateJson));
 
         var corrupt = Path.Combine(_root, "corrupt.json");
         File.WriteAllText(corrupt, "{ not json");
-        Assert.Null(AtomicJson.Read<DownloadState>(corrupt));
+        Assert.Null(AtomicJson.Read(corrupt, StateJson));
     }
 
     [Fact]

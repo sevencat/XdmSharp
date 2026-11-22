@@ -8,6 +8,9 @@ namespace Xdm.Core.Configuration;
 public sealed class AppPaths
 {
     public const string DbFileName = "xdm.db";
+
+    /// <summary>旧版设置文件名（0.1.0 之前配置写 json，现在只用于迁移）。</summary>
+    public const string LegacySettingsFileName = "settings.json";
     public const string DbArgument = "--db";
     public const string EnvDb = "XDM_DB";
     public const string EnvDataDir = "XDM_DATA_DIR";
@@ -29,8 +32,8 @@ public sealed class AppPaths
     /// <summary>分段进度快照目录（与库同级）。</summary>
     public string StateDir => Path.Combine(DataDir, "state");
 
-    /// <summary>用户设置文件（与库同级，随 <c>--db</c> 一起搬家）。</summary>
-    public string SettingsPath => Path.Combine(DataDir, JsonSettingsStore.FileName);
+    /// <summary>旧版设置文件（与库同级）。配置现已存进库的 <c>settings</c> 表，这个路径只用于启动时一次性迁移。</summary>
+    public string SettingsPath => Path.Combine(DataDir, LegacySettingsFileName);
 
     /// <summary>是否因程序目录不可写而回退到 LocalAppData。</summary>
     public bool IsFallback { get; }

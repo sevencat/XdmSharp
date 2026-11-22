@@ -18,5 +18,5 @@ internal sealed class UiDownloadActions(DownloadManager manager) : IDownloadActi
 
     public void Resume(long id) => manager.Resume(id);
 
-    public void Delete(long id) => manager.Delete(id);
+    public void Delete(long id, bool deleteFile) => manager.Delete(id, deleteFile);
 }

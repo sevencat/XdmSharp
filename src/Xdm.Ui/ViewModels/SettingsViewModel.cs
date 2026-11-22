@@ -27,7 +27,7 @@ public sealed class SettingsViewModel : ViewModelBase
     private string _defaultHeadersText;
     private string _errorText = string.Empty;
 
-    public SettingsViewModel(AppSettings settings, string dbPath, string settingsPath)
+    public SettingsViewModel(AppSettings settings, string dbPath)
     {
         ArgumentNullException.ThrowIfNull(settings);
         _source = settings;
@@ -54,14 +54,10 @@ public sealed class SettingsViewModel : ViewModelBase
             settings.DefaultHeaders.Select(static h => $"{h.Key}: {h.Value}"));
 
         DbPath = dbPath;
-        SettingsPath = settingsPath;
     }
 
-    /// <summary>任务库位置（只读展示）。</summary>
+    /// <summary>任务库位置（只读展示；配置也存在这个库的 settings 表里）。</summary>
     public string DbPath { get; }
-
-    /// <summary>设置文件位置（只读展示）。</summary>
-    public string SettingsPath { get; }
 
     /// <summary>同时下载任务数（1–32）。</summary>
     public decimal MaxConcurrent

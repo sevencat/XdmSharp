@@ -17,6 +17,6 @@ public interface IDownloadActions
     /// <summary>恢复指定任务。</summary>
     void Resume(long id);
 
-    /// <summary>删除指定任务（含临时文件）。</summary>
-    void Delete(long id);
+    /// <summary>删除指定任务（含临时文件）。<paramref name="deleteFile"/> 为真时连已下载的文件一起删。</summary>
+    void Delete(long id, bool deleteFile);
 }

@@ -18,23 +18,30 @@ public sealed class DownloadEngine : IDisposable
     private readonly IRangeHttpClient _client;
     private readonly bool _ownsClient;
     private readonly string _stateDir;
+    private readonly bool _writeStateFiles;
     private readonly IDownloadObserver? _observer;
     private readonly DownloadEngineOptions _options;
     private readonly ConcurrentDictionary<long, Runtime> _runtimes = new();
     private bool _disposed;
 
     /// <summary>创建引擎。<paramref name="client"/> 为空时自建 <see cref="RangeHttpClient"/>。</summary>
+    /// <param name="writeStateFiles">
+    /// 是否把段表快照写到 <c>state/&lt;id&gt;.json</c>。接了任务库（<see cref="DownloadManager"/>）时由库负责持久化，
+    /// 这里传 <c>false</c>，避免同一份段表写两处、恢复时两边打架。
+    /// </param>
     public DownloadEngine(
         IRangeHttpClient? client = null,
         string? stateDir = null,
         IDownloadObserver? observer = null,
-        DownloadEngineOptions? options = null)
+        DownloadEngineOptions? options = null,
+        bool writeStateFiles = true)
     {
         _client = client ?? new RangeHttpClient();
         _ownsClient = client is null;
         _stateDir = stateDir ?? Path.Combine(AppContext.BaseDirectory, "state");
         _observer = observer;
         _options = options ?? new DownloadEngineOptions();
+        _writeStateFiles = writeStateFiles;
     }
 
     /// <summary>新建并启动任务（阻塞到探测完成；段在后台线程跑）。</summary>
@@ -101,7 +108,10 @@ public sealed class DownloadEngine : IDisposable
         }
     }
 
-    /// <summary>从 <c>.xdm-part</c> + 状态快照恢复；没有快照则等同 <see cref="Start"/>。</summary>
+    /// <summary>
+    /// 从段表 + <c>.xdm-part</c> 恢复。段表优先取任务对象自带的（<see cref="DownloadManager"/> 从库回填），
+    /// 只有任务没有段表时（无库模式）才读 <c>state/&lt;id&gt;.json</c>；两者都没有则等同 <see cref="Start"/>。
+    /// </summary>
     public DownloadTask Resume(DownloadTask task)
     {
         ArgumentNullException.ThrowIfNull(task);
@@ -111,8 +121,10 @@ public sealed class DownloadEngine : IDisposable
             throw new InvalidOperationException($"任务 {task.Id} 已在运行");
         }
 
-        var state = AtomicJson.Read<DownloadState>(StatePath(task));
-        if (state is null || !File.Exists(task.PartPath))
+        // 任务库恢复的任务自带段表与总大小；只有段表为空时才退回读旧版快照文件。
+        var hasTaskSegments = task.TotalSize is not null && task.Snapshot().Count > 0;
+        var state = hasTaskSegments ? null : ReadState(task);
+        if ((!hasTaskSegments && state is null) || !File.Exists(task.PartPath))
         {
             return Start(task);
         }
@@ -129,9 +141,13 @@ public sealed class DownloadEngine : IDisposable
         {
             ChangeStatus(task, DownloadStatus.Connecting);
 
-            var oldValidator = state.Validator;
-            var oldSize = state.TotalSize;
-            task.Validator = state.Validator;
+            // 旧版快照比任务对象权威（老数据可能只落在文件里）；没有快照时以任务对象为准。
+            var oldValidator = state?.Validator ?? task.Validator;
+            var oldSize = state?.TotalSize ?? task.TotalSize;
+            if (state is not null)
+            {
+                task.Validator = state.Validator;
+            }
 
             var probe = Probe(task, cancellation.Token);
             runtime.ProbeDone = true;
@@ -152,8 +168,11 @@ public sealed class DownloadEngine : IDisposable
                 && task.Validator is not null
                 && !string.Equals(oldValidator, task.Validator, StringComparison.Ordinal);
             var sizeChanged = oldSize is not null && task.TotalSize is not null && oldSize != task.TotalSize;
+            var restored = state is not null
+                ? TryRestoreSegments(task, state.Segments, state.TotalSize)
+                : TryRestoreTaskSegments(task);
 
-            if (validatorChanged || sizeChanged || task.NoRangeSupport || !TryRestoreSegments(task, state))
+            if (validatorChanged || sizeChanged || task.NoRangeSupport || !restored)
             {
                 _runtimes.TryRemove(task.Id, out _);
                 cancellation.Dispose();
@@ -255,11 +274,11 @@ public sealed class DownloadEngine : IDisposable
     /// <summary>该任务当前是否在引擎里跑。</summary>
     public bool IsRunning(long taskId) => _runtimes.ContainsKey(taskId);
 
-    /// <summary>分段快照目录（<c>state/&lt;id&gt;.json</c>）。</summary>
+    /// <summary>分段快照目录（<c>state/&lt;id&gt;.json</c>，只在无库模式下写）。</summary>
     public string StateDir => _stateDir;
 
     /// <summary>
-    /// 周期同步（任务库 30s 落盘时调用）：刷盘 + 写状态快照。不在运行中的任务直接返回。
+    /// 周期同步（任务库 30s 落盘时调用）：刷盘；无库模式下再写一份 json 快照。不在运行中的任务直接返回。
     /// </summary>
     public void PersistProgress(DownloadTask task)
     {
@@ -435,16 +454,45 @@ public sealed class DownloadEngine : IDisposable
         }
     }
 
-    private static bool TryRestoreSegments(DownloadTask task, DownloadState state)
+    /// <summary>把任务自带的段表（任务库回填的）校验一遍，合法就重整段状态后继续用。</summary>
+    private static bool TryRestoreTaskSegments(DownloadTask task)
     {
-        if (state.TotalSize is null || state.TotalSize != task.TotalSize || state.Segments.Count == 0)
+        var segments = task.Snapshot();
+        if (segments.Count == 0)
+        {
+            return false;
+        }
+
+        var saved = new List<SegmentState>(segments.Count);
+        foreach (var segment in segments)
+        {
+            saved.Add(new SegmentState
+            {
+                Id = segment.Id,
+                Offset = segment.Offset,
+                Length = segment.Length,
+                Synced = segment.Synced,
+                Status = segment.Status,
+            });
+        }
+
+        return TryRestoreSegments(task, saved, task.TotalSize);
+    }
+
+    /// <summary>
+    /// 段表校验：必须首尾相接覆盖 [0, TotalSize)，且 <c>Synced</c> 落在 [0, Length]。
+    /// 不合法返回 <c>false</c>，调用方整任务重来——宁可重下，也不拿错位的段拼出坏文件。
+    /// </summary>
+    private static bool TryRestoreSegments(DownloadTask task, IReadOnlyList<SegmentState> savedSegments, long? totalSize)
+    {
+        if (totalSize is null || totalSize != task.TotalSize || savedSegments.Count == 0)
         {
             return false;
         }
 
         long expected = 0;
-        var segments = new List<Segment>(state.Segments.Count);
-        foreach (var saved in state.Segments.OrderBy(static s => s.Id))
+        var segments = new List<Segment>(savedSegments.Count);
+        foreach (var saved in savedSegments.OrderBy(static s => s.Id))
         {
             if (saved.Offset != expected || saved.Length <= 0 || saved.Synced < 0 || saved.Synced > saved.Length)
             {
@@ -459,7 +507,7 @@ public sealed class DownloadEngine : IDisposable
             expected += saved.Length;
         }
 
-        if (expected != state.TotalSize)
+        if (expected != totalSize)
         {
             return false;
         }
@@ -648,9 +696,13 @@ public sealed class DownloadEngine : IDisposable
 
     private string StatePath(DownloadTask task) => Path.Combine(_stateDir, $"{task.Id}.json");
 
+    /// <summary>读旧版快照（只在任务没有自带段表时用；老版本升级上来的任务靠它续传一次）。</summary>
+    private DownloadState? ReadState(DownloadTask task)
+        => AtomicJson.Read(StatePath(task), XdmJsonContext.Default.DownloadState);
+
     private void SaveStateSafe(DownloadTask task)
     {
-        if (task.TotalSize is null)
+        if (!_writeStateFiles || task.TotalSize is null)
         {
             return;
         }
@@ -674,7 +726,7 @@ public sealed class DownloadEngine : IDisposable
                     Status = s.Status,
                 }).ToList(),
             };
-            AtomicJson.Write(StatePath(task), state);
+            AtomicJson.Write(StatePath(task), state, XdmJsonContext.Default.DownloadState);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

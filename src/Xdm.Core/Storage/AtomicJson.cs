@@ -1,5 +1,5 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 
 namespace Xdm.Core.Storage;
 
@@ -7,19 +7,18 @@ namespace Xdm.Core.Storage;
 /// 原子写 JSON：写 <c>.tmp</c> → fsync → <see cref="File.Move(string,string,bool)"/> 覆盖。
 /// 断电时要么是旧文件、要么是新文件，不会出现半个 JSON（<c>ARCHITECTURE.md</c> §7.2）。
 /// </summary>
+/// <remarks>
+/// 序列化一律走调用方传入的 <see cref="JsonTypeInfo{T}"/>（source-generated，见
+/// <see cref="XdmJsonContext"/>）：NativeAOT 下泛型 <c>JsonSerializer.Serialize&lt;T&gt;</c>
+/// 会被判为 <c>RequiresDynamicCode</c>/<c>RequiresUnreferencedCode</c>，且发布包里不带属性元数据。
+/// </remarks>
 public static class AtomicJson
 {
-    /// <summary>统一的序列化选项（camelCase + 枚举写字符串，方便手看与演进）。</summary>
-    public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)
-    {
-        WriteIndented = true,
-        Converters = { new JsonStringEnumConverter() },
-    };
-
     /// <summary>原子写。<paramref name="path"/> 的父目录不存在时自动创建。</summary>
-    public static void Write<T>(string path, T value)
+    public static void Write<T>(string path, T value, JsonTypeInfo<T> typeInfo)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(typeInfo);
         var directory = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(directory))
         {
@@ -29,7 +28,7 @@ public static class AtomicJson
         var temp = path + ".tmp";
         using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
         {
-            JsonSerializer.Serialize(stream, value, Options);
+            JsonSerializer.Serialize(stream, value, typeInfo);
             stream.Flush(flushToDisk: true);
         }
 
@@ -37,9 +36,10 @@ public static class AtomicJson
     }
 
     /// <summary>读 JSON；文件不存在或内容损坏时返回 <c>null</c>（调用方按"没有快照"处理）。</summary>
-    public static T? Read<T>(string path)
+    public static T? Read<T>(string path, JsonTypeInfo<T> typeInfo)
         where T : class
     {
+        ArgumentNullException.ThrowIfNull(typeInfo);
         if (!File.Exists(path))
         {
             return null;
@@ -48,7 +48,7 @@ public static class AtomicJson
         try
         {
             using var stream = File.OpenRead(path);
-            return JsonSerializer.Deserialize<T>(stream, Options);
+            return JsonSerializer.Deserialize(stream, typeInfo);
         }
         catch (JsonException)
         {

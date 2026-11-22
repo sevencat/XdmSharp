@@ -1,0 +1,102 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Xdm.Ui.Controls.TitleBar"
+             Focusable="False">
+
+  <UserControl.Resources>
+    <!-- 深色标题栏配色：底色取 logo 的背景色，图标嵌进去不留方块痕迹 -->
+    <SolidColorBrush x:Key="XdmTitleBarBrush" Color="#1F2B3B" />
+    <SolidColorBrush x:Key="XdmTitleBarBorderBrush" Color="#2C3A4E" />
+    <SolidColorBrush x:Key="XdmTitleBarForegroundBrush" Color="#E7EEF8" />
+  </UserControl.Resources>
+
+  <UserControl.Styles>
+    <!-- 标题栏按钮：44x30，无圆角无边框，hover 用半透明白（关闭键用红） -->
+    <Style Selector="Button.cap">
+      <Setter Property="Width" Value="44" />
+      <Setter Property="Height" Value="30" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.cap /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="Button.cap:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#26FFFFFF" />
+    </Style>
+    <Style Selector="Button.cap:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#3DFFFFFF" />
+    </Style>
+    <Style Selector="Button.cap.close:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#C42B1C" />
+    </Style>
+    <Style Selector="Button.cap.close:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#E81123" />
+    </Style>
+  </UserControl.Styles>
+
+  <Border x:Name="Bar"
+          Height="30"
+          Background="{DynamicResource XdmTitleBarBrush}"
+          BorderThickness="0,0,0,1"
+          BorderBrush="{DynamicResource XdmTitleBarBorderBrush}"
+          PointerPressed="OnBarPointerPressed">
+    <Grid ColumnDefinitions="Auto,*,Auto">
+
+      <StackPanel x:Name="IconHost"
+                  Orientation="Horizontal"
+                  Spacing="7"
+                  Margin="8,0,0,0"
+                  VerticalAlignment="Center">
+        <!-- logo 是透明底 PNG（tools/make-icons.ps1 生成）：白底/辉光已剥离，直接贴在深色标题栏上 -->
+        <Image Source="/Assets/xdm-logo.png"
+               Width="18"
+               Height="18"
+               Stretch="Uniform"
+               RenderOptions.BitmapInterpolationMode="HighQuality" />
+        <TextBlock x:Name="TitleText"
+                   FontSize="12"
+                   FontWeight="SemiBold"
+                   Foreground="{DynamicResource XdmTitleBarForegroundBrush}"
+                   VerticalAlignment="Center" />
+      </StackPanel>
+
+      <StackPanel Grid.Column="2" Orientation="Horizontal">
+        <Button x:Name="MinButton" Classes="cap" Click="OnMinimizeClick" PointerPressed="OnButtonPointerPressed">
+          <Rectangle Width="10" Height="1" Fill="{DynamicResource XdmTitleBarForegroundBrush}" />
+        </Button>
+
+        <Button x:Name="MaxButton" Classes="cap" Click="OnMaximizeClick" PointerPressed="OnButtonPointerPressed">
+          <Panel>
+            <Path x:Name="MaximizeGlyph"
+                  Data="M0.5,0.5 H9.5 V9.5 H0.5 Z"
+                  Stroke="{DynamicResource XdmTitleBarForegroundBrush}"
+                  StrokeThickness="1" />
+            <Panel x:Name="RestoreGlyph" IsVisible="False">
+              <Path Data="M2.5,2.5 V0.5 H9.5 V7.5 H7.5"
+                    Stroke="{DynamicResource XdmTitleBarForegroundBrush}"
+                    StrokeThickness="1" />
+              <Path Data="M0.5,2.5 H7.5 V9.5 H0.5 Z"
+                    Stroke="{DynamicResource XdmTitleBarForegroundBrush}"
+                    StrokeThickness="1" />
+            </Panel>
+          </Panel>
+        </Button>
+
+        <Button x:Name="CloseButton" Classes="cap close" Click="OnCloseClick" PointerPressed="OnButtonPointerPressed">
+          <Path Data="M0.5,0.5 L9.5,9.5 M9.5,0.5 L0.5,9.5"
+                Stroke="{DynamicResource XdmTitleBarForegroundBrush}"
+                StrokeThickness="1" />
+        </Button>
+      </StackPanel>
+
+    </Grid>
+  </Border>
+
+</UserControl>

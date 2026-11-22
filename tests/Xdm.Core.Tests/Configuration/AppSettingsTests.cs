@@ -1,5 +1,7 @@
 using Xdm.Core.Configuration;
 using Xdm.Core.Http;
+using Xdm.Core.Storage;
+using Xdm.Core.Tasks;
 
 namespace Xdm.Core.Tests.Configuration;
 
@@ -103,9 +105,10 @@ public sealed class AppSettingsTests : IDisposable
     }
 
     [Fact]
-    public void JsonStore_RoundTripsAllFields()
+    public void DbStore_RoundTripsAllFields()
     {
-        var store = new JsonSettingsStore(Path.Combine(_root, "settings.json"));
+        using var db = new TaskStore(":memory:");
+        var store = new DbSettingsStore(db);
         var settings = new AppSettings
         {
             MaxConcurrent = 5,
@@ -133,39 +136,55 @@ public sealed class AppSettingsTests : IDisposable
         Assert.False(loaded.NotifyOnComplete);
         Assert.Equal(2, loaded.MaxRetries);
         Assert.Equal(800, loaded.RetryBaseDelayMs);
+        Assert.Equal(db.DbPath, store.Path);
     }
 
     [Fact]
-    public void JsonStore_SaveIsAtomic_AndLeavesNoTempFile()
+    public void DbStore_SaveReplacesPreviousValue()
     {
-        var path = Path.Combine(_root, "settings.json");
-        var store = new JsonSettingsStore(path);
+        using var db = new TaskStore(":memory:");
+        var store = new DbSettingsStore(db);
 
         store.Save(new AppSettings());
         store.Save(new AppSettings { MaxConcurrent = 4 });
 
-        var files = Directory.GetFiles(_root);
-        var file = Assert.Single(files);
-        Assert.Equal("settings.json", Path.GetFileName(file));
         Assert.Equal(4, store.Load().MaxConcurrent);
     }
 
     [Fact]
-    public void JsonStore_MissingOrCorruptFile_ReturnsDefaults()
+    public void DbStore_EmptyOrCorruptRow_ReturnsDefaults()
     {
-        var path = Path.Combine(_root, "settings.json");
-        var store = new JsonSettingsStore(path);
+        using var db = new TaskStore(":memory:");
+        var store = new DbSettingsStore(db);
 
+        // 从没存过
         Assert.Equal(3, store.Load().MaxConcurrent);
 
-        File.WriteAllText(path, "{ not json");
+        // 手改坏了（或旧版本写入的结构）：退回默认值，不抛
+        db.SaveSettingsJson("{ not json");
         var fallback = store.Load();
         Assert.Equal(3, fallback.MaxConcurrent);
         Assert.Equal(ProxyMode.System, fallback.ProxyMode);
     }
 
     [Fact]
-    public void AppPaths_SettingsPath_SitsNextToDb()
+    public void DbStore_ImportLegacyJson_ImportsOnceAndDeletesFile()
+    {
+        using var db = new TaskStore(":memory:");
+        var store = new DbSettingsStore(db);
+        var legacy = Path.Combine(_root, AppPaths.LegacySettingsFileName);
+        AtomicJson.Write(legacy, new AppSettings { MaxConcurrent = 7 }, XdmJsonContext.Default.AppSettings);
+
+        Assert.True(store.ImportLegacyJson(legacy));
+        Assert.False(File.Exists(legacy));
+        Assert.Equal(7, store.Load().MaxConcurrent);
+
+        // 库里已有配置，不再迁第二次
+        Assert.False(store.ImportLegacyJson(legacy));
+    }
+
+    [Fact]
+    public void AppPaths_LegacySettingsPath_SitsNextToDb()
     {
         var db = Path.Combine(_root, "xdm.db");
         var paths = AppPaths.FromDbPath(db);

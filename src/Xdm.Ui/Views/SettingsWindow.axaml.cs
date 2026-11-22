@@ -13,7 +13,7 @@ public partial class SettingsWindow : Window
 
     /// <summary>设计器/测试用无参构造：不落盘。</summary>
     public SettingsWindow()
-        : this(new SettingsViewModel(new AppSettings(), string.Empty, string.Empty), null)
+        : this(new SettingsViewModel(new AppSettings(), string.Empty), null)
     {
     }
 

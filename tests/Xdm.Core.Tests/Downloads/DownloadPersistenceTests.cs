@@ -65,6 +65,9 @@ public sealed class DownloadPersistenceTests
             syncedBeforeRestart = manager.Find(id)!.SyncedBytes;
             Assert.InRange(syncedBeforeRestart, 1, bytes.Length - 1);
             Assert.True(File.Exists(PartPath(harness, id)));
+
+            // 接了任务库就不写 state/*.json：段表只有库里一份，恢复也不靠文件。
+            Assert.False(File.Exists(Path.Combine(harness.StateDir, $"{id}.json")));
         }
 
         Assert.Equal(DownloadStatus.Paused, Assert.Single(store.LoadAll()).Status);

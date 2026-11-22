@@ -28,7 +28,10 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var viewModel = CreateViewModel();
-            var window = new MainWindow(viewModel);
+            var window = new MainWindow(viewModel)
+            {
+                ConfirmOnExit = true,
+            };
             window.SettingsRequested += (_, _) => ShowSettings(window);
             desktop.MainWindow = window;
             desktop.Exit += OnExit;
@@ -51,8 +54,12 @@ public partial class App : Application
         }
 
         // 设置先于引擎加载：并发/限速/代理/重试都是建引擎时的输入。
-        _settingsStore = new JsonSettingsStore(Startup.Paths.SettingsPath);
-        _settings = _settingsStore.Load();
+        // 配置存在任务库的 settings 表里（与任务同库同备份）；旧版 settings.json 只在库里还没有配置时迁一次。
+        var store = Startup.Store ?? throw new InvalidOperationException("任务库未打开，无法加载设置");
+        var settingsStore = new DbSettingsStore(store);
+        settingsStore.ImportLegacyJson(Startup.Paths.SettingsPath);
+        _settingsStore = settingsStore;
+        _settings = settingsStore.Load();
         _limiter = new SpeedLimiter(_settings.SpeedLimitBytesPerSecond);
         _client = new RangeHttpClient(proxyMode: _settings.ProxyMode, proxyUrl: _settings.ProxyUrl);
 
@@ -88,7 +95,7 @@ public partial class App : Application
 
     private void ShowSettings(Window owner)
     {
-        var viewModel = new SettingsViewModel(_settings, Startup.Paths.DbPath, Startup.Paths.SettingsPath);
+        var viewModel = new SettingsViewModel(_settings, Startup.Paths.DbPath);
         var dialog = new SettingsWindow(viewModel, SaveSettings);
         _ = dialog.ShowDialog(owner);
     }

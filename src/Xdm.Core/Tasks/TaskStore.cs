@@ -92,6 +92,15 @@ public sealed class TaskStore : IDisposable
     private const string CreateSegmentsIndexSql =
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_segments_task_seg ON segments(task_id, seg_id);";
 
+    /// <summary>配置表：整份 <c>AppSettings</c> 一行（<see cref="SettingsRowId"/>），与任务同库同备份。</summary>
+    /// <remarks>PureDb 要求每表有且仅有一个 <c>INTEGER PRIMARY KEY</c>，所以用固定 id 而不是 text 主键。</remarks>
+    private const string CreateSettingsSql = """
+        CREATE TABLE IF NOT EXISTS settings (
+          id    INTEGER PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+        """;
+
     private const string InsertSql = """
         INSERT INTO tasks (
           id, kind, parent_id, url, file_name, target_folder, temp_folder, total_size, downloaded,
@@ -473,7 +482,7 @@ public sealed class TaskStore : IDisposable
 
     private void Initialize() => Locked(connection =>
     {
-        foreach (var sql in new[] { CreateTasksSql, CreateSegmentsSql, CreateSegmentsIndexSql })
+        foreach (var sql in new[] { CreateTasksSql, CreateSegmentsSql, CreateSegmentsIndexSql, CreateSettingsSql })
         {
             using var command = Command(connection, null, sql);
             command.ExecuteNonQuery();
@@ -584,9 +593,51 @@ public sealed class TaskStore : IDisposable
         }
     }
 
+    /// <summary>配置行的固定 id（整份 <c>AppSettings</c> 存在这一行里）。</summary>
+    private const long SettingsRowId = 1;
+
+    /// <summary>读配置 JSON；没写过时返回 <c>null</c>。</summary>
+    public string? LoadSettingsJson() => Locked(connection =>
+    {
+        using var query = Command(connection, null, "SELECT value FROM settings WHERE id = $id;");
+        AddParameter(query, "$id", SettingsRowId);
+        return query.ExecuteScalar() as string;
+    });
+
+    /// <summary>整份覆盖写配置 JSON（先 UPDATE，缺行时 INSERT；同一事务，断电不会只写一半）。</summary>
+    public void SaveSettingsJson(string json)
+    {
+        ArgumentNullException.ThrowIfNull(json);
+
+        Locked(connection =>
+        {
+            using var transaction = connection.BeginTransaction();
+
+            int affected;
+            using (var update = Command(connection, transaction, "UPDATE settings SET value = $value WHERE id = $id;"))
+            {
+                AddParameter(update, "$value", json);
+                AddParameter(update, "$id", SettingsRowId);
+                affected = update.ExecuteNonQuery();
+            }
+
+            if (affected == 0)
+            {
+                using var insert = Command(connection, transaction, "INSERT INTO settings (id, value) VALUES ($id, $value);");
+                AddParameter(insert, "$id", SettingsRowId);
+                AddParameter(insert, "$value", json);
+                insert.ExecuteNonQuery();
+            }
+
+            transaction.Commit();
+        });
+    }
+
     private static object SerializeHeaders(IReadOnlyDictionary<string, string>? headers)
         => headers is { Count: > 0 }
-            ? JsonSerializer.Serialize(headers)
+            ? JsonSerializer.Serialize(
+                new Dictionary<string, string>(headers),
+                XdmJsonContext.Default.DictionaryStringString)
             : DBNull.Value;
 
     private static IReadOnlyDictionary<string, string>? DeserializeHeaders(string? json)
@@ -598,7 +649,7 @@ public sealed class TaskStore : IDisposable
 
         try
         {
-            return JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+            return JsonSerializer.Deserialize(json, XdmJsonContext.Default.DictionaryStringString);
         }
         catch (JsonException)
         {

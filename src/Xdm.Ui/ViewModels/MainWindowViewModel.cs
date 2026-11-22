@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Windows.Input;
+using Xdm.Core.Configuration;
 using Xdm.Core.Downloads;
 using Xdm.Ui.Formatting;
 using Xdm.Ui.Services;
@@ -101,10 +102,11 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public string ListSummary => $"显示 {Rows.Count} / 共 {_all.Count} 个任务";
 
+    /// <summary>进行中任务数（不受分类过滤影响，退出确认文案用）。</summary>
+    public int ActiveCount => _all.Count(r => r.IsActive);
+
     /// <summary>新建下载窗口的默认保存目录（由设置页的「目录」页签决定）。</summary>
-    public string DefaultSaveFolder { get; set; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-        "Downloads");
+    public string DefaultSaveFolder { get; set; } = KnownFolders.Downloads();
 
     /// <summary>新建下载窗口的默认分段数（由设置页的「连接」页签决定）。</summary>
     public int DefaultSegments { get; set; } = 8;
@@ -119,6 +121,14 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     /// <summary>请求用资源管理器打开目录（由窗口订阅，ViewModel 不直接启动进程）。</summary>
     public event EventHandler<string>? OpenFolderRequested;
+
+    /// <summary>
+    /// 删除前的确认（窗口注入真实对话框；为空则直接删，供演示 / 单测）。
+    /// 返回 <c>null</c> 表示用户取消，<c>false</c> 只删任务，<c>true</c> 连已下载的文件一起删。
+    /// </summary>
+    public Func<DownloadRowViewModel, Task<bool?>>? ConfirmDelete { get; set; }
+
+    private readonly HashSet<long> _deleting = [];
 
     public void AddRange(IEnumerable<DownloadRecord> records)
     {
@@ -158,10 +168,39 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
     }
 
-    public void Delete(DownloadRowViewModel row)
+    /// <summary>同步删除入口（行内按钮、Del 键）：内部转异步，不等确认结果。</summary>
+    public void Delete(DownloadRowViewModel row) => _ = DeleteAsync(row);
+
+    /// <summary>
+    /// 删除行：有 <see cref="ConfirmDelete"/> 时先弹确认框，用户取消则什么都不做；
+    /// 同一个任务重复点击（确认框还开着）直接忽略。
+    /// </summary>
+    public async Task DeleteAsync(DownloadRowViewModel row)
     {
-        Actions?.Delete(row.Id);
-        RemoveRow(row);
+        if (!_deleting.Add(row.Id))
+        {
+            return;
+        }
+
+        try
+        {
+            bool? deleteFile = false;
+            if (ConfirmDelete is { } confirm)
+            {
+                deleteFile = await confirm(row);
+                if (deleteFile is null)
+                {
+                    return;
+                }
+            }
+
+            Actions?.Delete(row.Id, deleteFile.Value);
+            RemoveRow(row);
+        }
+        finally
+        {
+            _deleting.Remove(row.Id);
+        }
     }
 
     /// <summary>管理器事件回调：按 id 摘行（与 <see cref="Delete"/> 幂等）。</summary>

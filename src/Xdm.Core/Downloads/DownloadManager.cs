@@ -48,7 +48,6 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
     private readonly Thread _scheduler;
     private readonly DownloadEngine _engine;
     private readonly TaskStore? _store;
-    private readonly string _stateDir;
     private readonly Timer? _persistTimer;
     private int _maxConcurrent;
     private IReadOnlyDictionary<string, string>? _defaultHeaders;
@@ -67,8 +66,14 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         options ??= new DownloadManagerOptions();
         _maxConcurrent = Math.Max(1, options.MaxConcurrent);
         _store = options.Store;
-        _engine = new DownloadEngine(options.Client, options.StateDir, this, options.EngineOptions);
-        _stateDir = _engine.StateDir;
+
+        // 接了任务库就别再写 state/*.json：段表只在库里落一份，重启从库恢复，避免两处数据对不上。
+        _engine = new DownloadEngine(
+            options.Client,
+            options.StateDir,
+            this,
+            options.EngineOptions,
+            writeStateFiles: _store is null);
 
         if (_store is not null)
         {
@@ -338,8 +343,11 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         }
     }
 
-    /// <summary>删除：暂停、删临时文件与快照、移出列表。已发布的目标文件不动。</summary>
-    public bool Delete(long id)
+    /// <summary>
+    /// 删除：暂停、删临时文件、移出列表、删库记录。
+    /// <paramref name="deleteFile"/> 为 <c>true</c> 时连已发布的目标文件一起删（界面上是「同时删除已下载的文件」）。
+    /// </summary>
+    public bool Delete(long id, bool deleteFile = false)
     {
         Entry? entry;
         lock (_gate)
@@ -353,9 +361,46 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         _queue.Remove(id);
         _engine.Delete(entry.Task);
         ReleaseSlot(entry);
+
+        if (deleteFile)
+        {
+            DeletePublishedFile(entry);
+        }
+
         TryStore(store => store.Delete(id));
         TaskRemoved?.Invoke(id);
         return true;
+    }
+
+    /// <summary>
+    /// 删已发布的目标文件：优先用本次会话记下的真实路径（改名策略下可能与 <see cref="DownloadTask.FileName"/> 不同），
+    /// 重启恢复的任务则按「目标目录 + 文件名」拼。
+    /// </summary>
+    private static void DeletePublishedFile(Entry entry)
+    {
+        var path = entry.FinalPath;
+        if (string.IsNullOrWhiteSpace(path) && !string.IsNullOrWhiteSpace(entry.Task.FileName))
+        {
+            path = Path.Combine(entry.Task.TargetFolder, entry.Task.FileName);
+        }
+
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 文件被占用或没权限：任务照样删，文件由用户自己处理。
+            Debug.WriteLine($"[xdm] 删除文件失败 {path}：{ex.Message}");
+        }
     }
 
     /// <inheritdoc />
@@ -713,14 +758,6 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                     ErrorText = errorText,
                     Segments = task.Snapshot().Select(ToSnapshot).ToArray(),
                 };
-
-                // 快照文件比库更"重"（引擎只认它）；只有库里才有段时补写一份，恢复后才能真续传。
-                if (partExists &&
-                    row.Segments.Count > 0 &&
-                    status is DownloadStatus.Paused or DownloadStatus.Failed or DownloadStatus.DiskError)
-                {
-                    WriteStateIfMissing(task);
-                }
             }
         }
         catch (Exception ex) when (ex is SqlException or IOException or UnauthorizedAccessException)
@@ -832,34 +869,6 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
             // 落库失败不能影响下载线程；暴露在 PersistenceError 里供界面/测试排查。
             PersistenceError = ex.Message;
             Debug.WriteLine($"[xdm] 任务库写入失败：{ex}");
-        }
-    }
-
-    private void WriteStateIfMissing(DownloadTask task)
-    {
-        var path = Path.Combine(_stateDir, $"{task.Id}.json");
-        if (File.Exists(path))
-        {
-            return;
-        }
-
-        try
-        {
-            AtomicJson.Write(path, new DownloadState
-            {
-                Id = task.Id,
-                Url = task.Url,
-                FileName = task.FileName,
-                TotalSize = task.TotalSize,
-                Validator = task.Validator,
-                NoRangeSupport = task.NoRangeSupport,
-                Segments = task.Snapshot().Select(ToState).ToList(),
-                SavedAt = DateTimeOffset.UtcNow,
-            });
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            Debug.WriteLine($"[xdm] 快照补写失败：{ex}");
         }
     }
 

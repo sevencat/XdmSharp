@@ -145,7 +145,7 @@ C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
   `DownloadManagerOptions.Store` 接线完成。写库时机为状态迁移 / 切分 /
   每 30s 同步 / 完成失败，**不在每秒进度里写**；退出时做最后一次同步。
   恢复规则：`Queued/Connecting/Downloading` → `Paused`，`Completed` 校验目标文件存在否则 `Failed`；
-  段与进度从库回填，快照缺失时用库里的段补写 `state/<id>.json`，恢复后可继续续传。
+  段与进度从库回填，续传直接用回填的段（引擎不写也不读 `state/<id>.json`，见 ARCHITECTURE §7.2）。
   重名策略 `Rename/Overwrite/Fail` 在完成阶段生效，发布仍是同目录 `File.Move`（原子改名）。
   测试：Core 106 + Ui 51 = **157 全绿**，`dotnet build` 0 警告；应用二次启动（同一 `--db`）正常。
   未做：真实「100 任务并发 UI 不卡」压测（需批量建任务脚本）；任务分类/搜索/历史仍为空。
@@ -212,7 +212,7 @@ C# + Avalonia 12 + .NET 10，命名空间根 `Xdm`。
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
-| 大量进度条刷新导致掉帧（Skia 软件光栅 / 将来 SimdSkia） | 体验差 | 进度按 ≥1% 变化才更新；行内进度条用轻量自绘控件；M1 用 1000 行假数据压测 |
+| 大量进度条刷新导致掉帧（Skia 软件光栅 / 将来 SimdSkia） | 体验差 | 进度按 ≥1% 变化才更新；行内进度条用轻量自绘控件；M1 用 1000 行假数据压测；任务量大时改**队列 + 200ms 批量 flush**（`ARCHITECTURE.md` §6.1：字典索引、每帧汇总只算一次、结构变化也合并） |
 | exe 目录不可写导致任务库建不出来（装在 `Program Files`） | 启动即失败 | 回退 `%LOCALAPPDATA%\Xdm\xdm.db` 并提示，不弹窗阻断（`ARCHITECTURE.md` §7.1） |
 | 用户只备份 `xdm.db`、漏掉 `.lock` / `.pidx` | 丢最新进度 | 文档写明"三件一起拷"（`ARCHITECTURE.md` §7.1） |
 | Avalonia 12 与 11 的 API 差异缺乏资料 | 试错成本 | 以本机包内 `Avalonia.xml`/源码为准，不照抄 11.x 示例 |

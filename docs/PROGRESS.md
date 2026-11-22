@@ -11,7 +11,7 @@
 | M3 | 引擎核心（单段 → 多段 → 续传） | 完成（等分切段；动态二分/接管/竞速转入 M6） | 2026-11-22 |
 | M4 | 接线（Manager + 进度上屏） | 完成（进度详情窗口待做） | 2026-11-22 |
 | M5 | 任务库与队列（PureDb） | 完成（并发压测待补） | 2026-11-22 |
-| M6 | 打磨（限速/代理/通知/可选切 SimdAIO） | 进行中（限速/代理/设置已完成；重试退避/通知/单实例/托盘待做） | — |
+| M6 | 打磨（限速/代理/通知/可选切 SimdAIO） | 进行中（限速/代理/设置/自绘标题栏已完成；重试退避/通知/单实例/托盘/进度详情窗口待做） | — |
 
 状态取值：`未开始` / `进行中` / `完成` / `阻塞`（阻塞须在日志里写明原因）。
 
@@ -27,11 +27,160 @@
 | 6 | V2 HF 是否需要 `hf_transfer` 式多连接加速 | 待 V2 实测 CDN 单连接吞吐后定 | — |
 | 7 | 父子任务的列表呈现（展开 / 独立窗口 / 折叠统计） | 首期只做单行，但行模板预留子行区 | — |
 | 8 | 任务库位置与文件名 | **`AppContext.BaseDirectory\xdm.db`**（exe 同目录，绿色版）；不可写回退 `%LOCALAPPDATA%\Xdm\`；命令行 `--db <path>` 覆盖（优先级最高） | 2026-11-22 |
-| 9 | 发布形态：framework-dependent 单文件（12MB）还是 self-contained（~70MB） | 暂用 AIO 默认（需目标机装 .NET 10 运行时）；M6 按"绿色版"要求再定 | — |
+| 9 | 发布形态：framework-dependent 单文件（12MB）/ self-contained / NativeAOT（30MB） | 默认 framework-dependent（需 .NET 10）；另提供 AOT 档 `build.ps1 -Aot`（30MB 单 exe、目标机零依赖；构包需 MSVC 链接器 + Windows SDK） | 2026-11-22 |
+| 10 | 同时下载/恢复的任务量大时，界面怎么刷 | **待更新项进队列 → `DispatcherTimer` 每 200ms 在 UI 线程批量 flush**；同时把行定位改字典索引、每帧汇总只算一次、结构变化合并（方案见 `ARCHITECTURE.md` §6.1）。当前是 250ms 单条 drain，够用到百级任务 | 2026-11-22（方案定，未实现） |
 
 ## 日志
 
+### 2026-11-22 · logo 透明化并贴到标题栏
+
+- `tools/make-icons.ps1` 重写：从根 `logo.png` 生成**透明底**资源，不再做白底圆角牌。
+  关键处理是背景不能按固定阈值切——原图底色是 240~255 的渐变，改为从四边洪泛近白连通区；
+  箭头本体（min ≤ 200）保留原配色，中间浅色辉光按白色混入比例给半透明并反合成去白
+  （否则深色标题栏上会浮出一圈白雾），alpha 再做 3×3 均值消除边界碎齿，最后按内容包围盒裁正方形。
+- 产物：`src/Xdm.Ui/Assets/xdm-logo.png`（256×256 透明底，标题栏 18px / 关于页 52px / 窗口 Icon 共用）、
+  `src/Xdm.App/Assets/xdm.ico`（同一透明底十帧）。
+- `TitleBar.axaml` 的 logo 加 `BitmapInterpolationMode="HighQuality"`；实机 PrintWindow 抓图确认
+  深色标题栏上是透明底箭头，没有白块。
+- 文档：`UI-DESIGN.md` §11.3 改述透明化规则并注明「不要再用白底圆角牌」。
+
 > 每次提交/里程碑收尾追加一条，倒序（最新在上）。
+
+### 2026-11-22 · 续传改为库权威 + 删除确认 + 中文右键菜单 + 系统下载目录
+
+- **断点续传去掉 json 依赖**：`DownloadManager` 用 `writeStateFiles: false` 构造引擎，段表只落
+  `xdm.db` 的 `segments` 表；`Resume()` 优先用库回填到任务对象上的段（`TryRestoreTaskSegments`），
+  只在任务没有段表时才读旧版 `state/<id>.json`。删掉 `WriteStateIfMissing` 补写逻辑，
+  重启恢复不再碰文件。段表校验（首尾相接 / `Σ length == TotalSize` / `0 ≤ synced ≤ length`）
+  两种来源共用，不合法整任务重来。
+- **删除任务加确认**：`ConfirmDialog` 支持一个可选勾选项，删已完成任务时弹「同时删除已下载的文件」
+  （默认不勾）；未完成任务只删 `.xdm-part`。`MainWindowViewModel.DeleteAsync` 走窗口注入的
+  `ConfirmDelete`，同一任务重复点（确认框还开着）直接忽略；`IDownloadActions.Delete` 增加
+  `deleteFile` 参数，`DownloadManager.Delete` 负责删已发布文件（改名策略下用 `Entry.FinalPath`）。
+- **右键菜单中文化**：新增 `Controls/EditTextBox`（`TextBox` 子类，`ContextFlyout` 换成
+  撤销/剪切/复制/粘贴/全选，带 Ctrl+Z/X/C/V/A 提示，`Opening` 时按选区刷新可用项），
+  主窗口搜索框、设置页、新建下载窗口的 URL 输入框全部换用。
+- **默认下载目录走 Windows API**：`KnownFolders.Downloads()`（`SHGetKnownFolderPath`，
+  FOLDERID_Downloads），用户把「下载」搬到别的盘 / OneDrive 接管也能跟随；取不到时回退
+  `%USERPROFILE%\Downloads`。
+- 验证：build 0 警告 0 错误；199 测试全绿（Core 134 + Ui 65）。新增：删文件/留文件、已知文件夹
+  （含注册表 `Shell Folders` 对拍）、删除取消/勾选、右键菜单五项与快捷键、确认框勾选显隐、
+  删除确认接线、默认目录绝对路径。
+- 踩坑：`TextBox` 子类拿不到主题——Avalonia 类型选择器按精确类型匹配，`Template` 为 null
+  等于隐形控件；`protected override Type StyleKeyOverride => typeof(TextBox)` 复用父类型样式
+  （由 `KeepsThemeTemplate` 测试守住）。
+
+### 2026-11-22 · 品牌图换代：logo.png 重做图标 + README banner
+
+- 根目录 `logo.png`（480×480，白底 + 蓝紫渐变箭头 + 光带）成为唯一图标源，新增 `tools/make-icons.ps1`：
+  4 倍超采样画 22% 圆角路径再缩回，生成 `xdm-logo.png`（256×256，圆角外全透明）
+  与 `xdm.ico`（16/20/24/32/40/48/64/96/128/256 十帧，手工拼 ICONDIR + PNG 帧）。
+- 旧深色圆形徽标废弃：标题栏底色 `#1F2B3B` 不再需要与 logo 融为一体，18px 白牌是有意的品牌块；
+  关于窗口 52px、任务栏、资源管理器同源。
+- 踩坑：PowerShell 函数 `return $bytes`（`byte[]`）会被管道拆成 `object[]`，`BinaryWriter.Write`
+  写出坏 ico，CSC 报 `CS7065: 生成 Win32 资源时出错 -- Unable to read beyond the end of the stream`；
+  改成 `return , [byte[]]$stream.ToArray()` 保住数组类型。
+- README 顶部换成 `banner.jpg`（居中 `<img width="100%">`）+ 五条能力速览；工程结构补
+  `logo.png` / `banner.jpg` / `tools/make-icons.ps1`，常用命令补图标重生成一行。
+- 验证：build 0 警告 0 错误、186 测试全绿；截图确认标题栏 18px 与关于窗口 52px 显示正常。
+
+### 2026-11-22 · 配置入库存 `settings` 表 + NativeAOT 发布档（win-x64）
+
+- 配置不再写 `settings.json`：`TaskStore` 新增 `settings` 表（一份 `AppSettings` 一行），
+  `DbSettingsStore` 实现 `ISettingsStore`，写路径「`UPDATE` 影响 0 行 → `INSERT`」在同一事务内。
+  任务与配置同库，备份/搬家只剩一个 `.db`；设置页「设置文件」改为「设置存放（与任务同库）」。
+- 旧 `settings.json` 启动时一次性迁移：库里已有配置则跳过，导入成功才删文件，损坏则原样保留并按默认值启动。
+  删除 `JsonSettingsStore`，其测试改用 `DbSettingsStore` + `:memory:`（185 → 186 条）。
+- NativeAOT（win-x64）：`Xdm.App.csproj` 加 `PublishAot` 条件组（RID 固定、SelfContained、StripSymbols），
+  `build.ps1` 加 `-Aot` / `-KeepAotSymbols`。
+  - 踩点 1：`System.Text.Json` 反射序列化在 AOT 分析下是 IL2026/IL3050，仓库开了
+    `TreatWarningsAsErrors` 直接编译失败 → 改 source-generated `XdmJsonContext`
+    （`[JsonSerializable]` + `UseStringEnumConverter`），`AtomicJson.Write/Read` 与`TaskStore` 的
+    headers 序列化都改成显式传 `JsonTypeInfo<T>`。**新增落盘类型必须补 `[JsonSerializable]`**，
+    否则 AOT 包运行时抛"Metadata for type ... was not provided"。
+  - 踩点 2：PureDb 要求每表有且仅有一个 `INTEGER PRIMARY KEY`，`TEXT PRIMARY KEY` 建表直接失败 →
+    settings 表用固定 `id=1`。
+  - 踩点 3：MSBuild 的 `AfterTargets="Publish"` 早于 ILC 符号拷贝，删不掉 `xdm-app.pdb`（~118MB）→
+    改由 `build.ps1 -Aot` 发布后清理。
+- 验证：`dotnet build` 0 警告 0 错误；186 全绿；`build.ps1 -Configuration Release -Aot` 产出
+  `publish\win-x64-aot\xdm-app.exe`（30.1MB，目录里只有它）；实机跑 AOT 包：列表/分类绑定正常，
+  设置 → 保存后 `xdm.db` 含配置 JSON、**没有** `settings.json`，截图确认设置页文案。
+
+### 2026-11-22 · 工具栏/对话框按钮统一加矢量图标
+
+- 工具栏 7 个按钮全部「12px 图标 + 5px 间距 + 文本」：新建 `plus`、恢复 `play`、暂停 `pause`、
+  删除 `delete`、设置 `cog`、关于 `information`、退出 `logout`；确认框「取消 `close` / 确定 `check`」。
+  原先只有 `＋ 新建` 一个全角加号、`⚙ 设置` 一个 emoji，其余纯文字，风格不齐。
+- 图标用 Avalonia 内置 `PathIcon`（`Data` 写 Material Design Icons 的 24×24 path 字符串），
+  不用 emoji：彩色字形在 125%/175% DPI 下发糊，还依赖 Segoe UI Emoji 渲染差异。
+  `PathIcon` 的 `Fill` 取自继承的 `Foreground`，所以**按钮禁用时图标自动变灰**——
+  截图实测未选中行时「暂停/删除」图标与文字同为浅灰，选中后变正常深色，accent 的「新建」是白色。
+- 踩点：按钮 `Content` 变成 `StackPanel` 后 UIA 名不再是文本，给每个按钮补
+  `AutomationProperties.Name`；`ConfirmDialog` 的按钮文案可在构造里换（退出确认时是「退出」），
+  所以改成设置内部 `OkText`/`CancelText` 两个 `TextBlock` 并同步 `AutomationProperties.SetName`，
+  不再给 `Button.Content` 赋字符串。测试断言相应改为读 `TextBlock.Text` + `GetName` + `IsType<StackPanel>`。
+- 行内悬停按钮（`DownloadRow` 的暂停/目录/删除）保持纯文字 11px：行高 56 加图标会挤，且是次要操作。
+  规范写进 `UI-DESIGN.md` §3.1（图标对照表 + `PathIcon` 禁用态约束 + 可访问性要求）。
+- 补齐其余对话框的同类按钮，避免「同一个词有的带图标有的不带」：
+  关于窗口「关闭」、设置窗口「关闭」、新建下载窗口「取消」都加 `close`（✕）图标并设 `AutomationProperties.Name`。
+  仍未加图标的只剩设置窗口「保存/浏览…」与新建窗口「添加/浏览…」——
+  「保存/添加」是动词性主操作，等有明确的 `check`/`plus` 语义再统一，`浏览…` 本身是超短次要按钮。
+- 验证：`dotnet build` 0 警告 0 错误；Core 129 + Ui 56 = **185 全绿**；实机截图确认工具栏与确认框图标正常，
+  退出确认链路（点退出 → 取消 → 再退出 → 确认进程退出）复跑通过。
+
+### 2026-11-22 · 标题栏压到 30px、圆形 logo、关于/退出（含退出确认）
+
+- 标题栏 36 → **30px**（对齐 Neat Downloader 一类第三方自绘标题栏；系统默认 32 偏厚）。
+  按钮 46×36 → 44×30，logo 22 → 18，左距 10 → 8，间距 8 → 7。实测截图深色区 53 物理 px
+  @175% DPI，与工具栏 40px 比例正常。
+- `TitleBar` 新增 `ShowMinimize`：模态对话框（新建下载 / 设置 / 关于 / 确认框）设 `False`，
+  标题栏只剩「✕」，不再出现点了会把模态框最小化的怪按钮。
+- **logo 改圆形**：`logo.png` → `xdm-logo.png` 用「铺满 + 椭圆裁剪」重做，圆外全透明、
+  边缘 1px 抗锯齿；图案最外点距圆心 ~240 < 半径 255，光带端头不会被切；
+  原图底部残留的两个白角（采样 (2,509)=#F3F8FB）本来就在四角，落在圆外自然裁掉。
+  ico 同步重打十帧圆形。踩坑：先用 `DrawImage` 内缩 7% 再圆裁，得到的是「圆角方形/八角形」——
+  绘制矩形小于圆时，圆边那一圈没有内容，看起来像方角；必须让内容铺满整个圆再裁。
+  又试过「圆内填底色 + 图案内缩 15%」，结果底部白角被缩进圆里变成两个白三角（用 Graphics 的
+  ColorMap 也匹配不到渐变的背景），最后回到铺满方案。
+- 工具栏右侧新增 **[关于] [退出]**：
+  - `Views/AboutWindow.axaml`：圆形 logo 52px、版本（取 `AssemblyInformationalVersion`，去 `+hash`）、
+    GPL-3.0 与参考实现声明、技术栈，460 宽 × 内容自适应高。
+  - `Views/ConfirmDialog.axaml`：通用确认框（`ConfirmDialog.ShowAsync(owner, title, message, ok, cancel)`），
+    440 宽 × 内容自适应高，Alt+F4/✕ 关闭按「取消」处理（`ShowDialog<bool>` 返回 false）。
+- 退出确认：`MainWindow.ConfirmOnExit`（组合根设 `true`，无头测试保持 `false` 以免模态框挂住用例）。
+  重写 `OnClosing` 拦截，点「退出」与关窗口（标题栏 ✕ / Alt+F4）统一走 `ConfirmAndExitAsync`，
+  文案带 `MainWindowViewModel.ActiveCount`（不受分类过滤影响）；确认后置 `_exitConfirmed` 再 `Close()`
+  防递归。UIA 实测：点「退出」→ 弹框（772×342）→「取消」→ 窗口仍在、进程存活 →
+  再「退出」→「退出」→ 进程退出（`alive=False`）。
+- 测试：新增 `AboutWindow_Loads`、`ConfirmDialog_Loads_And_Exposes_Text`；
+  Core 129 + Ui 56 = **185 全绿**，`dotnet build` 0 警告 0 错误。
+
+### 2026-11-22 · 窗口外观：自绘深色标题栏 + 窗口略缩 + 图标
+
+- 系统 chrome 全关：三个窗口统一 `WindowDecorations="BorderOnly"`。试过
+  `ExtendClientAreaToDecorationsHint` + `TitleBarHeightHint`，Avalonia 12.1.6 下系统标题栏仍在
+  （截图里 logo 与系统标题文字重叠、左侧被边框挤压）；`ExtendClientAreaChromeHints` 在 12.x 已移除，
+  `HasTitleBar` 只存在于 `Avalonia.Controls.Chrome.WindowDrawnDecorations`（不能当附加属性用）。定案 `BorderOnly`。
+- 新增 `Ui/Controls/TitleBar.axaml(.cs)`：36px 深色条（`#1F2B3B` 底色取 logo 背景、`#2C3A4E` 分隔线），
+  左 22×22 logo + 12px SemiBold 标题，右最小化/最大化/关闭各 46×36（关闭键 hover `#C42B1C`）。
+  空白处 `BeginMoveDrag` 拖动、双击切换最大化、最大化时按钮换「还原」双框图；
+  `Title` / `ShowMaximize` 两个 `StyledProperty`，`SyncState()` 在 `TitleText is null` 时直接返回
+  （XAML 加载期属性先于子控件就位，用 `IsInitialized` 判会抛空）。
+- 尺寸：主窗口 1080×680 → **1000×620**（MinWidth 720）；新建下载 580×470 → 580×500；
+  设置 620×540 → 620×570（两者补标题栏后留出高度）。规格进 `UI-DESIGN.md` §11。
+- 图标：根目录 `logo.png` 处理成 `Ui/Assets/xdm-logo.png`（`AvaloniaResource`，窗口 `Icon` + 标题栏）
+  与 `App/Assets/xdm.ico`（`ApplicationIcon`，16/20/24/32/40/48/64/96/128/256 十帧）。
+  处理方式：白角转透明，边缘按亮度算 alpha（`255*(255-mn)/115`）保柔边，RGB 填标题栏底色避免白晕。
+- 一期范围收敛到 HTTP/HTTPS：新建下载底部提示改为「一期只支持 HTTP / HTTPS 直链（每行一个）；
+  HuggingFace 与 BT 后续版本再加。」页签骨架仍保留（V2/V3 只加页，不动窗口）。
+- 实测（非 Headless，物理像素）：双击最大化 `-12,-12 2352x1624` → 再双击还原 → 拖动位移 +210,+136；
+  `BorderOnly` 下右/下边缘仍可 resize；关闭键使进程退出。
+- 测试：新增 `Window_Uses_SelfDrawn_TitleBar`（主板）与 `WindowChromeTests` 两条（新建下载 / 设置，
+  顺带覆盖两个对话框的 XAML 加载——原先没有测试构造它们），断言 `WindowDecorations=BorderOnly`、
+  视觉树里正好一个 `TitleBar`、`Title`/`ShowMaximize` 正确；Core 129 + Ui 54 = **183 全绿**，
+  `dotnet build` 0 警告 0 错误。
+- 踩坑：上一轮 `dotnet test` 残留的 `testhost` 进程锁住 `Xdm.Core.Tests.dll` 导致 MSB3027，
+  `taskkill` 报「no running instance」，最后用 `Get-CimInstance Win32_Process | Invoke-CimMethod Terminate` 才清掉。
 
 ### 2026-11-22 · 存储引擎 SQLite → PureDb
 

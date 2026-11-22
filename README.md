@@ -1,6 +1,21 @@
-# Xdm
+<p align="center">
+  <img src="banner.jpg" alt="XdmSharp：High-Speed Multi-Threaded Download Manager，Built with C# & Avalonia" width="100%">
+</p>
+
+# XdmSharp
 
 Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传），C# + Avalonia 12 + .NET 10。
+
+## 特性
+
+- **多段并发**：同一条链接切多个 Range 段并行下载，段数可配（默认 8），动态切分补位
+- **断点续传**：任务与段表都落 `xdm.db`（暂停/失败立即写、运行中 30s），进程被杀也能接着下
+- **任务库**：任务、分段、用户配置都在同一个 `xdm.db`（PureDb），绿色版目录即数据
+- **限速 / 代理 / 队列**：全局并发闸门、限速令牌桶、系统/自定义代理
+- **默认目录**：走 `SHGetKnownFolderPath(FOLDERID_Downloads)`，用户把「下载」搬到别的盘也跟着走
+- **原生单文件**：可发布 NativeAOT 档（`build.ps1 -Aot`），30 MB 单 exe，目标机零依赖
+
+## 项目背景
 
 - 参考实现：`refcode/xdm-master`（XDM，Kotlin / Swing / GPL-3.0-or-later）
 - 已安装的参考程序：`D:\network\XDM\xdm-app.exe`（v9.0.11，jpackage + JDK 25；数据目录
@@ -58,9 +73,12 @@ Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传）�
 
 | 文件 | 位置 | 说明 |
 |---|---|---|
-| `xdm.db` | `AppContext.BaseDirectory\xdm.db` | PureDb 任务库；旁边有 `xdm.db.lock`（访问锁），写入量上去后还会生成 `xdm.db.pidx`（页索引），备份/迁移要一起拷 |
+| `xdm.db` | `AppContext.BaseDirectory\xdm.db` | PureDb 任务库：`tasks` / `segments` / **`settings`**（用户配置也在这，一份一行）。旁边有 `xdm.db.lock`（访问锁），写入量上去后还会生成 `xdm.db.pidx`（页索引），备份/迁移要一起拷 |
 | `state/<id>.json` | 同目录 `state/` | 分段进度快照（见 `ARCHITECTURE.md` §7.2） |
 | `.<id>.xdm-part` | 任务的目标目录 | 未完成的临时文件（点前缀 + `.xdm-part`，与参考实现一致），发布时原子改名 |
+
+配置**不写 json 文件**：限速/代理/并发/段数/默认目录等都在 `xdm.db` 的 `settings` 表里，
+和任务一起备份、一起搬家。旧版留下的 `settings.json` 会在库里还没有配置时导入一次并删除。
 
 exe 目录不可写（装在 `Program Files`、只读介质）时自动回退到 `%LOCALAPPDATA%\Xdm\`，不弹窗阻断。
 
@@ -83,10 +101,14 @@ XdmSharp.sln
 global.json                    SDK 固定 10.0.101
 Directory.Build.props          统一 TFM / Nullable / TreatWarningsAsErrors
 Directory.Packages.props       中央包版本管理
-build.ps1                      build [-Test] [-Publish] 快捷脚本
+build.ps1                      build [-Test] [-Publish] [-Aot] 快捷脚本
+logo.png                       品牌图（图标源文件，改动后跑 tools/make-icons.ps1 重新生成资源）
+banner.jpg                     README 顶部 banner
+tools/make-icons.ps1           logo.png → xdm-logo.png（透明底）+ xdm.ico（十帧，同透明底）
 src/
   Xdm.Core/                    下载引擎、HTTP 客户端、存储、任务库（不依赖 UI）
     Configuration/AppPaths.cs  --db / 环境变量 / 目录回退的路径解析
+    Configuration/DbSettingsStore.cs  设置存库（settings 表）+ 旧 settings.json 迁移
     Errors/DownloadError.cs    协议无关的失败原因 + 中文文案
     Http/                      RangeHttpClient（自跟重定向、状态码→SourceOutcome）、请求/响应模型
     Storage/PartFile.cs        未完成文件：单句柄 + 偏移写（多段并发无需锁）
@@ -109,6 +131,8 @@ src/
     Views/SettingsWindow.axaml      设置页骨架（常规/连接/目录/网络）
     Controls/DownloadRow.axaml      列表行模板（两行式，悬停出操作）
     Controls/SegmentBar.cs          分段进度条（自绘 Control，不走 ProgressBar）
+    Controls/TitleBar.axaml         自绘深色标题栏（窗口 WindowDecorations=BorderOnly）
+    Assets/xdm-logo.png             窗口图标 / 标题栏 logo（透明底，由根目录 logo.png 处理而来）
     ViewModels/                 MainWindow / DownloadRow / Category / NewDownload + ViewModelBase/RelayCommand
     Formatting/TextFormat.cs    字节 / 速度 / 剩余时间 / 百分比的唯一文案入口
     Services/IDownloadActions.cs 界面命令到引擎的出口（App 实现，测试可注入假实现）
@@ -150,12 +174,17 @@ dotnet restore
 dotnet build                                  # 或 .\build.ps1
 dotnet run --project src/Xdm.App -- --db .\dev.db
 $env:XDM_DEMO=1000; dotnet run --project src/Xdm.App   # 1000 条假数据，复验列表虚拟化
-dotnet test                                   # 全部测试（157 条：Core 106 + Ui 51）
+dotnet test                                   # 全部测试（186 条：Core 130 + Ui 56）
 dotnet test tests/Xdm.Ui.Tests                # 界面测试（Headless，无需窗口，约 1 s）
+pwsh tools/make-icons.ps1                     # 改了 logo.png 后重生成 xdm-logo.png / xdm.ico
 .\build.ps1 -Configuration Release -Test -Publish   # ①构建 ②测试 ③发布 win-x64
+.\build.ps1 -Configuration Release -Aot             # NativeAOT 发布到 publish\win-x64-aot
 
-# 发布产物：publish\win-x64\xdm-app.exe（AIO 单文件，约 12MB，framework-dependent）
+# 普通发布：publish\win-x64\xdm-app.exe（AIO 单文件，约 12MB，framework-dependent）
 # 目标机需 .NET 10 运行时；是否改 self-contained 见 docs/PROGRESS.md 待决事项
+# AOT 发布：publish\win-x64-aot\xdm-app.exe（单个原生 exe，约 30MB，目标机不需要运行时）
+#   - 需要 MSVC 链接器 + Windows SDK（VS「使用 C++ 的桌面开发」）
+#   - 目录里只有 exe；原生符号 xdm-app.pdb（~118MB）默认删除，排障加 -KeepAotSymbols
 ```
 
 ## 文档

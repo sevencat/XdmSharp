@@ -20,15 +20,24 @@
 | 设置 | `Views/SettingsWindow.axaml` | ✔ | 常规 / 连接 / 目录 / 网络 四页 |
 | 关于 | `Views/AboutWindow.axaml` | ✔ | 版本、许可（GPL-3.0）、参考实现声明 |
 | 完成通知 | `Views/CompletionToast.axaml` | M6 | 右下角气泡，可"打开文件/打开目录" |
-| 删除确认 / 重名冲突 | `Views/ConfirmDialog.axaml` | ✔ | 通用确认框，勿各写一套 |
+| 删除确认 / 重名冲突 | `Views/ConfirmDialog.axaml` | ✔ | 通用确认框，勿各写一套；支持一个可选勾选项（删除任务的「同时删除已下载的文件」） |
+
+所有输入框（搜索、URL、设置项）用 `Controls/EditTextBox`，而不是原生 `TextBox`：主题自带的右键菜单是
+英文 Cut/Copy/Paste，`EditTextBox` 换成「撤销 / 剪切 / 复制 / 粘贴 / 全选」并在弹出时按选区置灰。
+它是 `TextBox` 子类且 `StyleKeyOverride => typeof(TextBox)`，样式与行为完全沿用父类型。
 
 以上文件均在 `src/Xdm.Ui/Views/`，命名空间 `Xdm.Ui.Views`（XAML 写 `x:Class="Xdm.Ui.Views.MainWindow"`）。
+
+所有窗口统一 `WindowDecorations="BorderOnly"` + 自绘 `Controls/TitleBar`（见 §11），
+不再使用系统标题栏；窗口 `Title` 仍保留（任务栏、Alt+Tab、Headless 断言依赖它）。
 
 ## 3. 主窗口
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ [+ 新建]  [▶ 恢复] [⏸ 暂停] [🗑 删除] │ 🔍 搜索           [⚙ 设置]         │ 工具栏 40px
+│ ▣ XDM Sharp                                        ─   □   ✕                │ 标题栏 30px（自绘，深色）
+├──────────────────────────────────────────────────────────────────────────────┤
+│ [＋ 新建] [▶ 恢复] [⏸ 暂停] [🗑 删除] │ 🔍 搜索   [⚙ 设置] [ⓘ 关于] [⇥ 退出] │ 工具栏 40px
 ├───────────────┬──────────────────────────────────────────────────────────────┤
 │ 全部 (128)    │ 文件名                    │ 大小    │ 进度        │ 速度  │ 剩余 │
 │ 正在下载 (3)  │ ──────────────────────────────────────────────────────────── │
@@ -49,6 +58,39 @@
   将来真要加就在 `ListBox` 之上做排序（ViewModel 排序 + 重建集合），不要把 DataGrid 拉回来。
 - 虚拟化参数：`VirtualizingStackPanel.VirtualizationMode` 保持默认回收模式；
   `ScrollViewer.IsDeferredScrollingEnabled` 关闭；行模板不要包 `ScrollViewer`/`Border` 嵌套层级过深。
+- 工具栏右侧：[⚙ 设置] [关于] [退出]，`Button.tool` 样式。**退出必须确认**：
+  `MainWindow.ConfirmOnExit = true`（组合根设置）时，点「退出」与关窗口（标题栏关闭键 / Alt+F4）
+  都走 `ConfirmDialog`，文案带进行中任务数（`MainWindowViewModel.ActiveCount`），
+  确认后才真正 `Close()`；取消则窗口保持。无头测试不设该开关，避免模态框挂住用例。
+
+### 3.1 按钮图标
+
+所有带文字的按钮统一「**12px 矢量图标 + 5px 间距 + 文本**」，不用 emoji 字形
+（`⚙` / `🗑` 这类彩色字形在 125%/175% DPI 下发糊，且依赖 Segoe UI Emoji 的渲染差异）。
+
+| 按钮 | 图标（Material Design Icons，24×24 viewBox） |
+|---|---|
+| 新建 | `plus` |
+| 恢复 | `play` |
+| 暂停 | `pause` |
+| 删除 | `delete`（垃圾桶） |
+| 设置 | `cog` |
+| 关于 | `information`（圆 i） |
+| 退出 | `logout`（门 + 右箭头） |
+| 取消 | `close`（✕） |
+| 关闭 | `close`（✕，与「取消」同款；关于窗口、设置窗口） |
+| 确定 | `check`（✓） |
+| 标题栏最小化 / 最大化 / 关闭 | 见 §11.1，1px 线宽几何，与系统窗钮同观感 |
+
+实现约束：
+
+- 图标用 `PathIcon`（`Data` 直接写 path 字符串，`Stretch="Uniform"` 默认）。
+  `PathIcon.Fill` 取自继承的 `Foreground`，所以按钮禁用时图标自动变灰——**不要**改成
+  `Path` + 固定 `Fill`，那样禁用态图标仍是亮的。
+- 按钮 `Content` 变成 `StackPanel` 后，UIA 名称不再是文本，**必须**显式设
+  `AutomationProperties.Name="暂停"` 之类；`ConfirmDialog` 在构造里同步设置（按钮文案可换）。
+- 行内悬停按钮（`DownloadRow` 的暂停/目录/删除）保持纯文字 11px：行高只有 56，
+  加图标会挤，且它们是次要操作。
 
 ## 4. 列表行规范（`Controls/DownloadRow.axaml`）
 
@@ -165,9 +207,63 @@
 | Token | 值 |
 |---|---|
 | 行高 | 56（紧凑模式 40） |
+| 标题栏高 | 36（自绘，见 §11） |
 | 工具栏高 | 40 |
 | 状态栏高 | 24 |
 | 左栏宽 | 180（可折叠至 0） |
 | 圆角 | 4（进度条 2） |
 | 字体 | 系统字体栈（SimdAIO 无 Inter，禁止 `WithInterFont()`；字号/字重按 Fluent 默认） |
 | 字号 | 13 正文 / 11 次要 / 15 标题 |
+
+## 11. 窗口外观（自绘标题栏 / 尺寸 / 图标）
+
+系统 chrome 一律关掉，标题栏自己画：`WindowDecorations="BorderOnly"`
+（不要用 `ExtendClientAreaToDecorationsHint`——Avalonia 12.1.6 里它去不掉系统标题栏，
+会与本控件叠成两层；`ExtendClientAreaChromeHints` 在 12.x 已移除）。
+
+### 11.1 `Controls/TitleBar`
+
+| 项 | 规格 |
+|---|---|
+| 高 | 30，底部 1px 分隔线（与 Neat Downloader 等第三方自绘标题栏同高，系统默认 32 偏厚） |
+| 底色 | `#1F2B3B`（`XdmTitleBarBrush`） |
+| 分隔线 | `#2C3A4E`（`XdmTitleBarBorderBrush`） |
+| 前景 | `#E7EEF8`（`XdmTitleBarForegroundBrush`） |
+| 左区 | 18×18 透明底 logo（`/Assets/xdm-logo.png`，白底与辉光已剥离，直接贴深色底板）+ 12px SemiBold 标题 |
+| 右区 | 最小化 / 最大化 / 关闭，各 44×30，`Button.cap` 样式（无圆角无边框） |
+| 按钮 hover | 约 `#26FFFFFF`；关闭键 hover `#C42B1C`、按下 `#E81123` |
+| 交互 | 空白处按下即 `BeginMoveDrag`；双击切换最大化；最大化时最大化键变「还原」双框图标 |
+| 属性 | `Title`（与 `Window.Title` 分开维护）、`ShowMaximize` / `ShowMinimize`（对话框两者都设 `False`） |
+
+约束：
+
+- 宿主窗口必须是 `WindowDecorations="BorderOnly"`，否则两层标题栏。
+- 标题栏放在 `DockPanel.Dock="Top"` 的第一项；窗口根布局保持 `DockPanel`，不要改成 `Grid` 硬编码行。
+- 标题与图标按钮的 `PointerPressed` 必须 `e.Handled = true`，否则点按钮会把窗口拖起来。
+
+### 11.2 窗口尺寸
+
+| 窗口 | 默认 | 最小 |
+|---|---|---|
+| 主窗口 | 1000×620 | 720×420 |
+| 新建下载 | 580×500 | 480×400 |
+| 设置 | 620×570 | 540×480 |
+| 关于 | 460×（内容自适应高） | 不可缩放 |
+| 确认框（`ConfirmDialog`） | 440×（内容自适应高） | 不可缩放 |
+
+对话框一律 `WindowStartupLocation="CenterOwner"` + `ShowInTaskbar="False"`，主窗口 `CenterScreen`。
+`SizeToContent="Height"` 的对话框不要设 `Height`，否则内容会按固定高度拉伸。
+
+### 11.3 图标资源
+
+- 唯一来源是仓库根 `logo.png`（480×480，白底 + 蓝紫渐变箭头 + 光带），处理脚本 `tools/make-icons.ps1`：
+  `pwsh tools/make-icons.ps1` 一次生成下面两个文件，改 logo 后重跑即可，**不要手工改产物**。
+- 透明化规则：从四边洪泛「近白背景」（原图底色是 240~255 的渐变，不能用固定阈值一刀切）；
+  箭头本体（min 通道 ≤ 200）保留原配色；中间那圈浅色辉光按白色混入比例给半透明并反合成去白，
+  否则贴到深色标题栏上会浮出一圈白雾。alpha 再做一遍 3×3 均值消掉洪泛边界的碎齿，
+  最后按内容包围盒裁正方形缩到目标尺寸。
+- 界面内 logo：`src/Xdm.Ui/Assets/xdm-logo.png`（`AvaloniaResource`，256×256，**透明底**）：
+  标题栏（18px，`RenderOptions.BitmapInterpolationMode="HighQuality"`）、关于窗口（52px）、窗口 `Icon` 共用。
+- exe / 任务栏图标：`src/Xdm.App/Assets/xdm.ico`（`ApplicationIcon`），同一透明底打包
+  16/20/24/32/40/48/64/96/128/256 十个 PNG 压缩帧（手工拼 ICONDIR，256 帧在目录项里记 0）。
+- 不要再用「白底圆角牌」：标题栏是深色，白块会显得像贴纸。

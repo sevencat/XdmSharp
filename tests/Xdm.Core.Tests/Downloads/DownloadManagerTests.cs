@@ -158,6 +158,40 @@ public class DownloadManagerTests
     }
 
     [Fact]
+    public void Delete_CompletedTask_WithDeleteFile_RemovesPublishedFile()
+    {
+        using var harness = new EngineHarness();
+        using var manager = CreateManager(harness);
+        harness.Server.AddFile("/keep.bin", EngineHarness.MakeBytes(64 * 1024));
+
+        var id = manager.Enqueue(Request(harness, "/keep.bin", "keep.bin"));
+        Assert.True(harness.WaitFor(() => manager.Find(id)?.Status == DownloadStatus.Completed));
+        var published = Path.Combine(harness.TargetFolder, "keep.bin");
+        Assert.True(File.Exists(published));
+
+        Assert.True(manager.Delete(id, deleteFile: true));
+
+        Assert.False(File.Exists(published));
+        Assert.Null(manager.Find(id));
+    }
+
+    [Fact]
+    public void Delete_CompletedTask_WithoutDeleteFile_KeepsPublishedFile()
+    {
+        using var harness = new EngineHarness();
+        using var manager = CreateManager(harness);
+        harness.Server.AddFile("/stay.bin", EngineHarness.MakeBytes(64 * 1024));
+
+        var id = manager.Enqueue(Request(harness, "/stay.bin", "stay.bin"));
+        Assert.True(harness.WaitFor(() => manager.Find(id)?.Status == DownloadStatus.Completed));
+
+        Assert.True(manager.Delete(id));
+
+        Assert.True(File.Exists(Path.Combine(harness.TargetFolder, "stay.bin")));
+        Assert.Null(manager.Find(id));
+    }
+
+    [Fact]
     public void FailedTask_FreesSlotForNextTask()
     {
         using var harness = new EngineHarness();

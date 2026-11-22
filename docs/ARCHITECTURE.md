@@ -106,7 +106,7 @@ public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
 | 参考实现的做法 | 意图 | 我们的对应手段 |
 |---|---|---|
 | `-XX:+UseZGC` + 极小堆（`-Xms6m`、`-XX:-AlwaysPreTouch`） | 低延迟 GC、常驻内存小 | .NET 默认 Server/Workstation GC 即可；不显式调 `GCSettings` |
-| `-XX:SharedArchiveFile=xdm-zgc.jsa`（AppCDS） | 跳过类加载，冷启动快 | `PublishReadyToRun=true`（发布档）；不追求 Native AOT |
+| `-XX:SharedArchiveFile=xdm-zgc.jsa`（AppCDS） | 跳过类加载，冷启动快 | `PublishReadyToRun=true`（发布档）；另提供 NativeAOT 发布档（`build.ps1 -Aot`） |
 | `-XX:TieredStopAtLevel=1`、`CICompilerCount=1`、`ConcGCThreads=1` | 启动期不浪费 CPU 在编译/并行 GC 上 | 保持默认分层编译；启动路径别做重活 |
 | `-Djava.library.path=$APPDIR` 预载原生库 | 避免首次调用时加载抖动 | 首帧前不加载大资源；图标走 `avares://` 编译资源 |
 
@@ -123,6 +123,13 @@ public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
 - 发布形态：`dotnet publish -c Release -r win-x64` 用 AIO 默认的**单文件、不压缩**
   （无原生库要解压，冷启动不吃亏），再叠加 `PublishReadyToRun=true`；
   **禁止** `EnableCompressionInSingleFile`。
+- NativeAOT 档：`build.ps1 -Configuration Release -Aot`（= `dotnet publish -p:PublishAot=true`，
+  RID 在 `Xdm.App.csproj` 里固定为 `win-x64`）。产物是**单个原生 exe（~30 MB），目标机不需要 .NET 运行时**，
+  发布目录里不留 `.pdb`（ILC 原生符号 ~118 MB，`-KeepAotSymbols` 可保留）。
+  约束：全链路不得用反射序列化/动态代码——JSON 一律走 `XdmJsonContext`（source-generated），
+  Avalonia 视图必须声明 `x:DataType`（编译绑定）。新增落盘类型时要在 `XdmJsonContext` 补
+  `[JsonSerializable]`，否则 AOT 包运行时会抛"Metadata for type ... was not provided"。
+  代价是发布慢（几分钟）且**必须装 MSVC 链接器 + Windows SDK**（VS「使用 C++ 的桌面开发」）。
 - 内存结论：原先拍的 80 MB 不现实（Avalonia 空壳已 100 MB 私有），改为 120 MB 上限并作为回归基线。
 
 ## 3. Core 结构
@@ -130,7 +137,8 @@ public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
 ```
 src/Xdm.Core/                       命名空间根 Xdm.Core
   Configuration/
-    AppSettings.cs                  用户设置（JSON 落盘：限速/代理/段数/目录/重名策略）
+    AppSettings.cs                  用户设置（限速/代理/段数/目录/重名策略）
+    DbSettingsStore.cs              设置读写（存任务库 settings 表，含旧 settings.json 迁移）
     ISettings.cs
   Http/
     IRangeHttpClient.cs             抽象，便于测试注入
@@ -277,7 +285,7 @@ public interface IRangeHttpClient
 
 ```
 UI 线程 (Dispatcher)              引擎
-    │  Post(节流 250ms)             │
+    │  队列 + 定时 flush(250ms)     │
     │◄──────── 进度事件 ────────────┤
     │                               ├─ 调度线程（1 个/任务）：切分、接管决策
     │                               ├─ 段线程（N 个，N ≤ MaxSegments）：阻塞读 + 写
@@ -291,6 +299,30 @@ UI 线程 (Dispatcher)              引擎
 - 单写句柄：`PartFile` 全局一个 `SafeFileHandle`，各段通过
   `RandomAccess.Write(handle, span, offset)` 并发写；暂停/完成/失败时统一关闭。
 - UI 永不读引擎可变字段：通过 `IDownloadObserver` 拿到不可变快照（`SegmentSnapshot` record）。
+
+### 6.1 批量刷新（任务量大时启用，二期优化）
+
+现状（`DownloadUiBridge`）：进度事件进 `ConcurrentDictionary<long, DownloadRecord>` 按 id 去重，
+`DispatcherTimer` **250ms** 在 UI 线程 `Drain()` 逐条 `UpdateRow`；结构变化（新增/删除）直接
+`Dispatcher.UIThread.Post` 立即投递。任务数在百级以内够用。
+
+**触发条件**：并发任务数上百、或一次恢复上千条任务时，`Drain()` 的单帧成本按 O(n²) 增长
+（`UpdateRow` 里 `List.Find` + `StatusSummary` 全表 Count/Sum 都是 O(n)，每行各算一次）。
+届时按下述方式改成批量刷新，接口不动、只改 `DownloadUiBridge` + `MainWindowViewModel` 内部：
+
+| 项 | 做法 |
+|---|---|
+| 队列 | 沿用按 id 去重的字典；结构变化（Add/Remove）也进同一队列，不再逐条 `Post` |
+| 节拍 | `DispatcherTimer` **200ms**，`DispatcherPriority.Background`，一帧只 flush 一次 |
+| 行索引 | ViewModel 内 `Dictionary<long, DownloadRowViewModel>` 取代 `List.Find`（O(1) 定位） |
+| 行更新 | 只对真正变化的字段 `RaisePropertyChanged`（`SetProperty` 已做值比较）；`Sync` 状态未变就跳过 |
+| 汇总 | `RefreshSummaries()` / 分类计数每帧**结尾调一次**；`StatusSummary`、`ListSummary` 缓存成字段，脏了才重算 |
+| 结构批量 | tick 内一次性 `AddRange` / 批量移除，`ApplyFilter` 每帧最多一次 |
+| 小规模豁免 | 队列长度 < 阈值（如 32）时直接 `Post` 单条刷新，保低延迟 |
+| 度量 | tick 内 `Stopwatch` 计时，单帧 > 8ms 记日志并自适应降频（200 → 400ms） |
+
+单帧成本目标：n=1000 全在下载时，一帧 (200ms) flush 的 UI 线程耗时应 < 8ms，
+使列表滚动不掉帧（验收项见 `PLAN.md` 五、风险登记）。
 
 ## 7. 持久化
 
@@ -338,7 +370,7 @@ PureDb 是纯托管嵌入式库（`net10.0`，无原生依赖），SQL 方言是
   | 5 | 第 4 步目录不可写 | `%LOCALAPPDATA%\Xdm\xdm.db` |
 
 - **`state/` 恒为"库文件所在目录"下的 `state\`**（`AppPaths.StateDir`），两者永不拆开：
-  `--db D:\xdm\my.db` → 库 `D:\xdm\my.db` + 快照 `D:\xdm\state\`。
+  `--db D:\xdm\my.db` → 库 `D:\xdm\my.db` + 快照目录 `D:\xdm\state\`（库模式不再往里写文件，见 §7.2）。
 - 参数边界：相对路径按**当前工作目录**转绝对路径（`dotnet run -- --db .\dev.db` 落在仓库根）；
   父目录不存在则创建；`--db` 指向已存在的**目录**或缺少取值 → 报错并以返回码 `2` 退出
   （不猜、不静默回退到默认路径，否则用户会对着错误的库排查）。
@@ -388,7 +420,18 @@ CREATE TABLE IF NOT EXISTS segments (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_segments_task_seg ON segments(task_id, seg_id);
+
+-- 配置表：整份 AppSettings 一行（id 恒为 1）；PureDb 不支持 text 主键，所以用固定 id
+CREATE TABLE IF NOT EXISTS settings (
+  id    INTEGER PRIMARY KEY,
+  value TEXT NOT NULL
+);
 ```
+
+- **配置也在这个库里**（`settings` 表，`id=1`，`value` 是整份 `AppSettings` 的 JSON）：
+  与任务同库同备份，不再有 `settings.json`。写路径是「`UPDATE` 影响 0 行则 `INSERT`」，同一事务，
+  断电不会只写一半；JSON 由 source-generated `XdmJsonContext` 序列化（NativeAOT 下无反射元数据）。
+  旧版 `settings.json` 在**库里还没有配置**时于启动阶段导入一次并删除文件；文件损坏则原样保留、按默认值启动。
 
 - 启动：`status=Queued/Active` 的记录一律改 `Paused`（进程被杀残留）；`Finished` 的校验目标文件，
   不存在则降级 `Failed`。
@@ -399,10 +442,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_segments_task_seg ON segments(task_id, seg_
 - 参考实现用自定义 tagged 二进制（`task-<id>.info`、`<id>.state`、`active/paused/finished-downloads.dat`），
   这里**不照搬**：带 SQL 的关系库更适合后续加分类/搜索/历史。
 
-### 7.2 状态文件 `state/<id>.json`（进度，独立于任务库）
+### 7.2 段表持久化：任务库优先，`state/<id>.json` 只兜底
 
-目录基准与任务库一致：`<AppContext.BaseDirectory>\state\`（与 `xdm.db` 同级，回退时一起回退到
-`%LOCALAPPDATA%\Xdm\state\`）。这样把整个程序目录拷走 = 连未完成任务一起带走。
+**接了任务库（正常启动）**：段表只有一份，在 `xdm.db` 的 `segments` 表里。
+`DownloadManager` 用 `writeStateFiles: false` 构造 `DownloadEngine`，暂停 / 失败 / 30s 同步
+都只「刷盘 + 落库」，不再产生 `state/*.json`。重启时 `RestoreFromStore()` 把段读回
+`DownloadTask`（`ReplaceSegments`），`Resume()` 先探测（`If-Range` + 总大小），
+校验通过后直接拿任务自带的段续传——恢复路径不读任何文件。
+
+**没有任务库时**（引擎单测、纯文件模式）：引擎自己写 `state/<id>.json`，
+`Resume()` 发现任务没有段表才回退读它。格式与写入方式（tmp → `Flush(true)` → `Move`）不变：
 
 ```json
 {
@@ -418,8 +467,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_segments_task_seg ON segments(task_id, seg_
 }
 ```
 
-写入方式：写 `<id>.json.tmp` → `FileStream.Flush(true)` → `File.Move(tmp, final, overwrite: true)`。
-`version` 为格式演进留口。
+- 同一任务不会有两份权威数据：库模式不写 json；旧版本升级留下的残留 json 只在
+  「任务没有段表」时被读一次，随后随暂停 / 完成 / 删除清掉。
+- 两种来源共用同一套段表校验：偏移首尾相接、`Σ length == TotalSize`、
+  `0 ≤ synced ≤ length`；不合法就整任务重来——宁可重下，也不拿错位的段拼出坏文件。
+- `state/` 目录仍跟着 `<AppContext.BaseDirectory>`（与 `xdm.db` 同级，随库一起回退），
+  只是库模式下它保持空。
 
 ## 8. UI ↔ 引擎边界
 
@@ -462,6 +515,7 @@ src/Xdm.Ui/                          命名空间根 Xdm.Ui
     NewDownloadViewModel.cs
     SettingsViewModel.cs
   Controls/
+    TitleBar.axaml                   + .axaml.cs 自绘标题栏（WindowDecorations=BorderOnly 配套）
     SegmentBar.cs                    DrawingContext 直绘的分段条
     SpeedGraph.cs                    速度曲线
     DownloadRow.axaml                列表行模板
@@ -471,12 +525,17 @@ src/Xdm.Ui/                          命名空间根 Xdm.Ui
   Services/
     IShellService.cs                 打开文件/目录/对话框（测试可打桩）
     IDispatcherFacade.cs             封装 Dispatcher，便于单测
+  Assets/
+    xdm-logo.png                     AvaloniaResource：窗口图标 / 标题栏 logo
   Styles/
     AppStyles.axaml                  Token 与行样式
 ```
 
 `Xdm.App` 只保留：`Program.cs`（启动链）、`App.axaml(.cs)`（主题挂载、主窗口创建）、
-`AppBootstrapper.cs`（DI 装配、设置加载、任务库初始化）。
+`AppBootstrapper.cs`（DI 装配、设置加载、任务库初始化），以及 `Assets/xdm.ico`
+（`ApplicationIcon`，资源管理器/任务栏图标）。
+
+窗口外观（系统 chrome 关闭、标题栏自绘、尺寸与图标规格）见 `UI-DESIGN.md` §11。
 
 ## 10. Kotlin → C# 文件对照
 
