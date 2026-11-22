@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Xdm.Core.Downloads;
 using Xdm.Core.Errors;
 using Xdm.Core.Http;
+using Xdm.Core.Scheduling;
 
 namespace Xdm.Core.Tests.Fakes;
 
@@ -64,7 +65,10 @@ public sealed class EngineHarness : IDisposable
     public string StateDir => Path.Combine(Root, "state");
 
     /// <summary>测试用的快节奏参数：小分段、短超时，跑得快且仍走真实分支。</summary>
-    public static DownloadEngineOptions FastOptions => new()
+    public static DownloadEngineOptions FastOptions => FastOptionsWith(null);
+
+    /// <summary>同 <see cref="FastOptions"/>，额外挂上全局连接配额（断言并发上限用）。</summary>
+    public static DownloadEngineOptions FastOptionsWith(ConnectionSlots? slots) => new()
     {
         MaxSegments = 4,
         MinSegmentSize = 64 * 1024,
@@ -75,10 +79,19 @@ public sealed class EngineHarness : IDisposable
         RetryBaseDelay = TimeSpan.FromMilliseconds(10),
         ProgressInterval = TimeSpan.FromMilliseconds(20),
         MaxBusyWaits = 2,
+        ConnectionSlots = slots,
     };
 
-    public DownloadTask CreateTask(string path, long id = 1, string? fileName = null, int maxSegments = 4)
-        => new(id, Server.BaseUrl + path, fileName ?? string.Empty, TargetFolder, maxSegments);
+    public DownloadTask CreateTask(
+        string path,
+        long id = 1,
+        string? fileName = null,
+        int maxSegments = 4,
+        string? sha256 = null)
+        => new(id, Server.BaseUrl + path, fileName ?? string.Empty, TargetFolder, maxSegments)
+        {
+            ContentSha256 = sha256,
+        };
 
     /// <summary>确定性字节序列：内容错位一眼能看出来。</summary>
     public static byte[] MakeBytes(int length, int seed = 7)

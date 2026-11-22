@@ -43,6 +43,30 @@ public sealed class AppSettingsTests : IDisposable
     }
 
     [Fact]
+    public void Normalize_ClampsFilesPerTask_AndKeepsDefault()
+    {
+        // 默认 3：多文件任务默认同时跑 3 个文件（HF 一个包几百个文件，不能全放出去）。
+        Assert.Equal(3, new AppSettings().MaxFilesPerTask);
+        Assert.Equal(3, new AppSettings().Normalized().MaxFilesPerTask);
+
+        Assert.Equal(1, new AppSettings { MaxFilesPerTask = 0 }.Normalized().MaxFilesPerTask);
+        Assert.Equal(1, new AppSettings { MaxFilesPerTask = -7 }.Normalized().MaxFilesPerTask);
+        Assert.Equal(16, new AppSettings { MaxFilesPerTask = 999 }.Normalized().MaxFilesPerTask);
+        Assert.Equal(5, new AppSettings { MaxFilesPerTask = 5 }.Normalized().MaxFilesPerTask);
+    }
+
+    [Fact]
+    public void Clone_CopiesFilesPerTask()
+    {
+        var source = new AppSettings { MaxFilesPerTask = 7 };
+        var clone = source.Clone();
+
+        Assert.Equal(7, clone.MaxFilesPerTask);
+        clone.MaxFilesPerTask = 2;
+        Assert.Equal(7, source.MaxFilesPerTask);
+    }
+
+    [Fact]
     public void Normalize_CustomProxyWithBadUrl_FallsBackToSystem()
     {
         var settings = new AppSettings
@@ -117,6 +141,42 @@ public sealed class AppSettingsTests : IDisposable
     }
 
     [Fact]
+    public void Normalize_FillsDefaultHuggingFaceEndpoint()
+    {
+        var settings = new AppSettings { HuggingFaceEndpoint = "   " }.Normalized();
+
+        Assert.Equal("https://huggingface.co", settings.HuggingFaceEndpoint);
+    }
+
+    [Fact]
+    public void Normalize_TrimsHuggingFaceEndpointAndDropsQuery()
+    {
+        var settings = new AppSettings { HuggingFaceEndpoint = " https://hf-mirror.com/?a=1 " }.Normalized();
+
+        Assert.Equal("https://hf-mirror.com", settings.HuggingFaceEndpoint);
+    }
+
+    [Fact]
+    public void Normalize_InvalidHuggingFaceEndpointFallsBackToDefault()
+    {
+        var settings = new AppSettings { HuggingFaceEndpoint = "ftp://example.com" }.Normalized();
+
+        Assert.Equal("https://huggingface.co", settings.HuggingFaceEndpoint);
+    }
+
+    [Theory]
+    [InlineData("  hf_token  ", "hf_token")]
+    [InlineData("", null)]
+    [InlineData("hf tok en", null)]
+    [InlineData("hf_token\r\nInjected: 1", null)]
+    public void Normalize_SanitizesHuggingFaceToken(string input, string? expected)
+    {
+        var settings = new AppSettings { HuggingFaceToken = input }.Normalized();
+
+        Assert.Equal(expected, settings.HuggingFaceToken);
+    }
+
+    [Fact]
     public void Normalize_DropsBadHeaders()
     {
         var settings = new AppSettings
@@ -173,6 +233,8 @@ public sealed class AppSettingsTests : IDisposable
             NotifyOnComplete = false,
             MaxRetries = 2,
             RetryBaseDelayMs = 800,
+            HuggingFaceEndpoint = "https://hf-mirror.com",
+            HuggingFaceToken = "hf_secret",
         };
 
         store.Save(settings);
@@ -190,6 +252,8 @@ public sealed class AppSettingsTests : IDisposable
         Assert.False(loaded.NotifyOnComplete);
         Assert.Equal(2, loaded.MaxRetries);
         Assert.Equal(800, loaded.RetryBaseDelayMs);
+        Assert.Equal("https://hf-mirror.com", loaded.HuggingFaceEndpoint);
+        Assert.Equal("hf_secret", loaded.HuggingFaceToken);
         Assert.Equal(db.DbPath, store.Path);
     }
 

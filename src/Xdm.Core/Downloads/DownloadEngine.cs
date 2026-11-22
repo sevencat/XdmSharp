@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Xdm.Core.Errors;
 using Xdm.Core.Http;
+using Xdm.Core.Scheduling;
 using Xdm.Core.Storage;
 
 namespace Xdm.Core.Downloads;
@@ -70,8 +71,17 @@ public sealed class DownloadEngine : IDisposable
             ChangeStatus(task, DownloadStatus.Connecting);
 
             // runtime 先注册再探测：否则用户在「正在连接」阶段点暂停会落空（探测最长可卡到读超时）。
-            var probe = Probe(task, cancellation.Token);
-            runtime.ProbeDone = true;
+            ProbeResult probe;
+            try
+            {
+                probe = Probe(task, cancellation.Token);
+            }
+            finally
+            {
+                // 探测一返回（正常/取消/异常）Pause 就能安全释放 CTS：之后没人再拿这个 token 注册或取 WaitHandle。
+                runtime.ProbeDone = true;
+            }
+
             if (cancellation.IsCancellationRequested)
             {
                 // 探测期间被暂停（探测自己也可能因取消而返回失败，这里先判取消，避免误报失败）。
@@ -108,6 +118,11 @@ public sealed class DownloadEngine : IDisposable
         {
             // 暂停路径负责保存快照、关句柄、置 Paused，这里只退出。
             return task;
+        }
+        finally
+        {
+            // 装配结束（成功起线程 / 探测失败 / 被取消）：Pause 可以安全枚举线程表并收尾了。
+            runtime.SetupDone.Set();
         }
     }
 
@@ -152,8 +167,17 @@ public sealed class DownloadEngine : IDisposable
                 task.Validator = state.Validator;
             }
 
-            var probe = Probe(task, cancellation.Token);
-            runtime.ProbeDone = true;
+            ProbeResult probe;
+            try
+            {
+                probe = Probe(task, cancellation.Token);
+            }
+            finally
+            {
+                // 探测一返回（正常/取消/异常）Pause 就能安全释放 CTS。
+                runtime.ProbeDone = true;
+            }
+
             if (cancellation.IsCancellationRequested)
             {
                 return task;
@@ -206,6 +230,11 @@ public sealed class DownloadEngine : IDisposable
             cancellation.Dispose();
             return task;
         }
+        finally
+        {
+            // 装配结束（成功起线程 / 探测失败 / 被取消 / 退回 Start）：Pause 可以安全枚举线程表并收尾了。
+            runtime.SetupDone.Set();
+        }
     }
 
     /// <summary>暂停：取消 → 等段线程退出 → 刷盘 → 写状态快照 → 关句柄。</summary>
@@ -217,9 +246,25 @@ public sealed class DownloadEngine : IDisposable
             return false;
         }
 
-        runtime.Cancellation.Cancel();
+        TryCancel(runtime);
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
-        foreach (var thread in runtime.Threads)
+
+        // 启动装配（探测 → 开句柄 → 起线程）可能还在本 runtime 上跑（Resume 在调度线程里执行）：
+        // 先等它收尾，否则会和 Launch 里往 Threads 追加线程并发（枚举时集合被改），
+        // 也可能在 Launch 之后才 Dispose CTS，让刚起的段线程踩到已释放的 token。
+        var setupLeft = deadline - DateTime.UtcNow;
+        if (setupLeft > TimeSpan.Zero)
+        {
+            runtime.SetupDone.Wait(setupLeft);
+        }
+
+        Thread[] threads;
+        lock (runtime.Gate)
+        {
+            threads = [.. runtime.Threads];
+        }
+
+        foreach (var thread in threads)
         {
             var left = deadline - DateTime.UtcNow;
             if (left <= TimeSpan.Zero)
@@ -256,6 +301,23 @@ public sealed class DownloadEngine : IDisposable
             runtime.Cancellation.Dispose();
         }
     }
+
+    /// <summary>
+    /// 取消但容忍 CTS 已被 <see cref="Complete"/> 收尾时释放：<c>Cancel</c> 对已释放的源会抛
+    /// <see cref="ObjectDisposedException"/>，而暂停与收尾本就可能撞在同一瞬间。
+    /// </summary>
+    private static void TryCancel(Runtime runtime)
+    {
+        try
+        {
+            runtime.Cancellation.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // 任务已经跑完（或已被前面的收尾释放），无需再取消。
+        }
+    }
+
 
     /// <summary>暂停并删掉临时文件与快照。</summary>
     public void Delete(DownloadTask task)
@@ -313,7 +375,7 @@ public sealed class DownloadEngine : IDisposable
         _disposed = true;
         foreach (var runtime in _runtimes.Values)
         {
-            runtime.Cancellation.Cancel();
+            TryCancel(runtime);
         }
 
         foreach (var id in _runtimes.Keys)
@@ -345,6 +407,8 @@ public sealed class DownloadEngine : IDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            // 探测也是一条真实连接，同样占全局名额：任务排在等待队列里时不能靠探测偷偷开连接。
+            using var lease = ConnectionSlots.AcquireLease(_options.ConnectionSlots, cancellationToken);
             using var response = ClientFor(task).Send(
                 new HttpRangeRequest
                 {
@@ -563,7 +627,11 @@ public sealed class DownloadEngine : IDisposable
                 IsBackground = true,
                 Name = $"xdm-seg-{task.Id}-{segment.Id}",
             };
-            runtime.Threads.Add(thread);
+            lock (runtime.Gate)
+            {
+                runtime.Threads.Add(thread);
+            }
+
             thread.Start();
         }
 
@@ -583,7 +651,7 @@ public sealed class DownloadEngine : IDisposable
         try
         {
             var runner = new SegmentRunner(task, segment, ClientFor(task), task.PartFile!, _options);
-            var result = runner.Run(runtime.Cancellation.Token);
+            var result = runner.Run(runtime.Token);
             if (!result.Success && result.Error != DownloadError.Cancelled)
             {
                 lock (runtime.Gate)
@@ -616,13 +684,13 @@ public sealed class DownloadEngine : IDisposable
     {
         var task = runtime.Task;
         var tracker = new ProgressTracker();
-        var token = runtime.Cancellation.Token;
+        var token = runtime.Token;
         while (Volatile.Read(ref runtime.Pending) > 0 && !token.IsCancellationRequested)
         {
             var synced = task.SyncedTotal;
             tracker.Add(synced, DateTimeOffset.UtcNow);
             _observer?.OnProgress(task.Id, synced, tracker.BytesPerSecond, tracker.Eta(task.TotalSize));
-            if (token.WaitHandle.WaitOne(_options.ProgressInterval))
+            if (Sleep(_options.ProgressInterval, token))
             {
                 break;
             }
@@ -662,6 +730,17 @@ public sealed class DownloadEngine : IDisposable
             task.PartFile?.FlushToDisk();
             ClosePartFile(task);
 
+            // 来源给了摘要（HF 的 LFS sha256）就校验：CDN 回了错文件、磁盘写坏了都在这一步拦住，
+            // 不能让坏内容进模型目录（推理框架会静默加载错权重）。part 此时已写满（上面校验过字节数）。
+            if (!string.IsNullOrWhiteSpace(task.ContentSha256)
+                && !SegmentVerifier.VerifyFile(task.PartPath, task.ContentSha256))
+            {
+                // 内容已坏，续传没有意义：删掉 part，用户点重试就是从头下。
+                TryDelete(task.PartPath);
+                Fail(task, DownloadError.Checksum, "内容校验失败：与来源给出的 sha256 不一致");
+                return;
+            }
+
             var name = string.IsNullOrWhiteSpace(task.FileName) ? FileNaming.FallbackName : task.FileName;
             var finalPath = FileNaming.ResolveTarget(task.TargetFolder, name, task.NamePolicy);
             if (finalPath is null)
@@ -688,6 +767,21 @@ public sealed class DownloadEngine : IDisposable
         finally
         {
             runtime.Cancellation.Dispose();
+        }
+    }
+
+    /// <summary>删文件但不让删除失败掩盖真正的原因（比如校验失败本身）。</summary>
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 
@@ -795,9 +889,26 @@ public sealed class DownloadEngine : IDisposable
             return;
         }
 
-        if (cancellationToken.WaitHandle.WaitOne(delay))
+        if (Sleep(delay, cancellationToken))
         {
             cancellationToken.ThrowIfCancellationRequested();
+        }
+    }
+
+    /// <summary>
+    /// 可被取消打断的等待。任务收尾（<c>Complete</c> / <see cref="Pause"/>）可能已经释放 CTS，
+    /// 此时取 <see cref="CancellationToken.WaitHandle"/> 会抛 <see cref="ObjectDisposedException"/>；
+    /// 一律按「该停了」处理，别让后台线程抛未捕获异常。
+    /// </summary>
+    private static bool Sleep(TimeSpan delay, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return cancellationToken.WaitHandle.WaitOne(delay);
+        }
+        catch (ObjectDisposedException)
+        {
+            return true;
         }
     }
 
@@ -812,17 +923,32 @@ public sealed class DownloadEngine : IDisposable
         {
             Task = task;
             Cancellation = cancellation;
+            Token = cancellation.Token;
         }
 
         public DownloadTask Task { get; }
 
         public CancellationTokenSource Cancellation { get; }
 
+        /// <summary>
+        /// 构造时抓下的 token。段线程 / 进度线程一律用它：<see cref="Cancellation"/> 被释放后
+        /// 再取 <c>Token</c> 属性会抛 <see cref="ObjectDisposedException"/>，而这个结构的
+        /// <see cref="CancellationToken.IsCancellationRequested"/> 始终可读。
+        /// </summary>
+        public CancellationToken Token { get; }
+
         /// <summary>探测已结束（成功或失败）；只有为真时 Pause 才能安全释放 CTS。</summary>
         public volatile bool ProbeDone;
 
+        /// <summary>
+        /// Start/Resume 的装配阶段（探测 → 开句柄 → 起线程）已结束。Pause 等它置位后再枚举
+        /// <see cref="Threads"/> 并释放 CTS，避免「枚举时集合被改」和「线程拿到已释放的 token」。
+        /// </summary>
+        public ManualResetEventSlim SetupDone { get; } = new(false);
+
         public object Gate { get; } = new();
 
+        /// <summary>段线程表；写入与快照都持 <see cref="Gate"/>。</summary>
         public List<Thread> Threads { get; } = [];
 
         public Thread? Reporter { get; set; }

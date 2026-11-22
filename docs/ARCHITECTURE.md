@@ -354,6 +354,42 @@ UI 线程 (Dispatcher)              引擎
 单帧成本目标：n=1000 全在下载时，一帧 (200ms) flush 的 UI 线程耗时应 < 8ms，
 使列表滚动不掉帧（验收项见 `PLAN.md` 五、风险登记）。
 
+### 6.2 全局连接配额
+
+任务级闸门（`DownloadManager` 的 `MaxConcurrentTasks`）只限制「几个任务同时在跑」，
+挡不住「4 个任务 × 8 段 = 32 条连接」；HF 那种一个任务几百个文件的场景更需要一条硬上限。
+因此再加一层 `Scheduling/ConnectionSlots`（信号量式，可运行中调容量）：
+
+| 项 | 约定 |
+|---|---|
+| 作用域 | 整个进程一个实例，由 `MewRuntime` 建好塞进 `DownloadEngineOptions.ConnectionSlots`，所有任务、所有段共用 |
+| 覆盖面 | 段线程的「发请求 → 读完响应体 → 关连接」整段（`SegmentRunner.Run` 的 `using var lease`），**以及探测请求**（`DownloadEngine.Probe`）：探测也占一条真实连接 |
+| 释放 | `SlotLease` 在 `Dispose` 里归还；重试、取消、异常都靠 `using` 兜住，不会漏名额 |
+| 调容量 | `SetCapacity` 调大立即 `PulseAll` 唤醒等待者；调小不打断在途连接，只让后续 `Acquire` 排队 |
+| 设置在 | `AppSettings.MaxConnections`（默认 32，夹紧 1–256，schema v4）；设置页「连接」页改完即时 `SetCapacity`，无需重启 |
+| 可观测 | `InFlight` / `Waiting` / `IsSaturated` 供测试与将来的状态栏使用 |
+
+**同一包内的文件闸门**：`MaxConcurrentTasks` 管的是「几个任务」，`MaxConnections` 管的是「几条连接」，
+中间还缺一层「一个多文件任务里几个文件同时在跑」——HF 一个模型动辄几百个文件，若全部进队列，
+它们会长期占满任务槽位，把用户手动加的小任务饿在后面。因此 `DownloadManager` 再加一道
+兄弟闸门（`AppSettings.MaxFilesPerTask`，默认 3，夹紧 1–16）：
+
+| 项 | 约定 |
+|---|---|
+| 作用域 | 只作用于 `ParentId > 0` 的子任务；独立任务照旧只受 `MaxConcurrent` 管 |
+| 计数 | `_runningChildren`（父行 id → 在跑子任务数），进出都在 `_gate` 内，随 `SlotHeld` 一起加减 |
+| 挡住时 | `TryTakeNext` 把候选**放回队尾**并继续扫下一个，单次只扫一遍当前队列长度（`budget`），不会空转 |
+| 放行 | 子任务结束/暂停/删除 → `ReleaseSlot` 还名额 → `_wake.Set()` 唤醒调度线程重扫 |
+| 效果 | 包内文件按队列顺序「跑满 N 个再补 N 个」，父行进度仍然单调推进，小任务也不会被大包长期挤占 |
+
+**暂停与装配的互斥**：`Start`/`Resume` 的装配阶段（探测 → 开句柄 → 起线程）会往 `Runtime.Threads`
+追加线程，而调度器线程上的 `Resume` 与被调度前的 `Pause` 可能撞在一起。`Runtime.SetupDone`
+（`ManualResetEventSlim`）在装配结束时置位，`Pause` 先 `Cancel` 再等它（上限 5s），之后才枚举线程表、
+Join、释放 CTS；线程表本身的读写都持 `Runtime.Gate`。另外后台线程一律用构造时抓下的
+`Runtime.Token` 而非 `Cancellation.Token` 属性（CTS 释放后取 `Token` 会抛 `ObjectDisposedException`），
+等待可取消延时时对 `WaitHandle` 的 `ObjectDisposedException` 按「已收尾」处理，避免段线程/进度线程
+抛未捕获异常。
+
 ## 7. 持久化
 
 ### 7.1 PureDb（任务库）
@@ -556,7 +592,7 @@ public interface IDownloadObserver
 {
     void OnTaskStatusChanged(long id, DownloadStatus status);
     void OnProgress(long id, long syncedTotal, double bytesPerSecond, TimeSpan? eta);
-    void OnSegmentsChanged(long id, IReadOnlyList<SegmentSnapshot> segments); // 仅详情窗口打开时订阅
+    void OnSegmentsChanged(long id, IReadOnlyList<SegmentSnapshot> segments); // 仅段表结构变化（切分/恢复/结束）
     void OnCompleted(long id, string finalPath);
     void OnFailed(long id, DownloadError error, string detail);
 }
@@ -566,8 +602,11 @@ public readonly record struct SegmentSnapshot(long Id, long Offset, long Length,
 
 - 引擎回调发生在任意线程；`Xdm.App.Mew` 里的 `MewDownloadBridge` 负责缓存最新值 + 250ms 合并 +
   `Dispatcher.BeginInvoke` 切回 UI 线程（结构变化立即投递）。
-- 任务列表行只订阅 `OnProgress` / `OnTaskStatusChanged`；详情窗口打开时才订阅 `OnSegmentsChanged`，
-  避免 N 段 × 1Hz 的无谓分配。
+- 任务列表行只订阅 `OnProgress` / `OnTaskStatusChanged`；`OnSegmentsChanged` 只在段表**结构**变化时发
+  （建段 / 切分 / 恢复 / 结束），不跟进度节拍。
+- 详情窗口不订阅事件，而是每 250ms 拉 `DownloadManager.Segments(id)` / `Children(id)`
+  （段表从 `task.Snapshot()` 现取，不读 `entry.Segments` 那份只在建段/暂停时刷新的缓存）。
+  窗口关掉即零开销，也不需要「只有窗口开着才有人听」的事件形态。
 - ViewModel 不持有 `DownloadTask`，只持有 `DownloadRecord`（不可变视图数据）。
 
 ## 9. Ui 层结构
@@ -689,19 +728,63 @@ V3：infohash / torrent 路径），首期恒为 NULL。
    → 重新调 `resolve` 拿新 URL 续传，**不消耗重试预算**。
 4. 认证：`Authorization: Bearer <token>`；token 来源顺序：任务级 → 设置 → `HF_TOKEN` 环境变量。
 5. 镜像：`HF_ENDPOINT`（如 `https://hf-mirror.com`），设置页可改；清单与 resolve 都走同一 endpoint。
-6. 并发：**文件级并发（默认 4）+ 文件内分段并发**，两者共用 `ConnectionSlots` 全局配额；
-   避免 1000 文件 × 8 段 = 8000 连接的灾难。
+6. 并发：**文件级并发（`AppSettings.MaxFilesPerTask`，默认 3）+ 文件内分段并发**，两者共用
+   `ConnectionSlots` 全局配额；避免 1000 文件 × 8 段 = 8000 连接的灾难（实现见 §6.2）。
 7. 校验：`size` 一致 → 写入 `content_sha256`；完成后校验（LFS 文件才有 sha256）。
    已存在且 size/sha256 一致 → 跳过（增量更新模型）。
 8. 目录：`path` 里的子目录必须保留（`onnx/model.onnx` → 目标目录下的 `onnx/model.onnx`）；
    `.gitattributes` 等小文件同样下载。
 9. revision：记 `main` / tag / commit hash；`source_meta_json` 存 `{endpoint, repo, revision, path}`。
 
-命名空间规划：`Xdm.Core.HuggingFace/`（`HubClient.cs`、`RepoManifest.cs`、`HfSource.cs`、
-`HfTaskPlanner.cs`）。不放进 `Http/`，因为它属于"来源编排"，不是传输层。
+命名空间：`Xdm.Core.HuggingFace/`。不放进 `Http/`，因为它属于"来源编排"，不是传输层。
 
 测试：不访问真实 Hub —— 用 `FakeHttpServer` 起一个假 Hub（`/api/models/...` 返回固定清单、
 `/resolve/...` 302 到自身另一路径），再叠加"签名 URL 过期一次"的剧本。
+
+#### 12.2.1 首版已落地（2026-11-23）
+
+| 文件 | 职责 |
+|---|---|
+| `HfRepo.cs` | `owner/name` 解析与校验、`ResolveUrl(path)` 拼 `{endpoint}/{repo}/resolve/{rev}/{path}?download=true` |
+| `HfFile.cs` | 清单条目：`path` / `size` / `sha256`；`RelativeFolder`、`IsSafePath`（拒 `..`、绝对路径、`//`、`\`） |
+| `HfHubClient.cs` | `GET {endpoint}/api/models/{repo}/tree/{rev}?recursive=true&expand=true` 分页拉清单；`CreateHandler` 开自动重定向 + 全部解压（与下载客户端相反），按 `ProxyRoute` 挂代理 |
+| `HfDownloadPlanner.cs` | `RootFolder` / `Plan`（落盘位置 + 按大小跳过已有文件）/ `ToRequests`（建子目录 → `DownloadRequest`） |
+
+与上文规划的差异（首版取舍）：
+
+1. **父行已在 2026-11-23 补上**（见 §12.2.2）；`HfDownloadPlanner.ToGroup` 出 `DownloadGroupRequest`。
+2. **重名策略 `Overwrite`**：模型目录是仓库镜像，大小变了就是文件更新。若走默认 `Rename` 会产出
+   `model (1).onnx`，推理框架按原名加载就读不到。大小一致的文件已由 `Plan` 跳过，所以覆盖是安全的。
+3. **清单请求与下载请求用两套 handler**：清单要跟 307 并解压 JSON；下载仍关重定向、关自动解压，
+   由引擎自己处理 `Expired` 与跨域剥离 `Authorization`。
+4. **token 顺序**：设置页 → `HF_TOKEN` 环境变量（任务级 token 首版不做）；只给 `resolve` 下发的请求带 `Bearer`，
+   清单请求同样带上以便访问 gated 仓库。
+5. **endpoint 归一**：`AppSettings.SanitizeEndpoint` 去空白/去查询串，非法值回落 `https://huggingface.co`。
+6. **发布前校验**：`DownloadEngine.Complete` 在 part 已写满并 flush 之后、改名发布之前，用 `SegmentVerifier`
+   比对 `ContentSha256`；不符则删掉 part 并报 `DownloadError.Checksum`（文案「内容校验失败」），重试即从头下。
+   只有 LFS 文件带 sha256，普通小文件跳过（`ContentSha256` 为空）。清单请求与下载请求共用选中的代理：
+   对话框每点一次「拉取文件」都按当前代理单选组重建清单客户端。
+7. **未做**：`cache_edit`/权限字段过滤、多连接加速（`PLAN.md` 待决 #6）。
+
+#### 12.2.2 父任务汇总（2026-11-23，契约 1/2 落地）
+
+- **建任务**：`DownloadManager.EnqueueGroup(DownloadGroupRequest)` 先插一条父行（`file_name = owner/name`、
+  `max_segments = 1`、`kind = HuggingFace`、`source_meta_json` 带 `container: true`），再逐文件
+  `AddTask(file, parentId)` 插子行。父行**不进调度队列**，引擎永远看不到它。
+- **汇总规则**（`AggregateLocked`）：`SizeBytes = Σ子.TotalSize`、`SyncedBytes = Σ子.SyncedTotal`、
+  `SpeedBps = Σ子速度`、`ChildCount/CompletedChildren = 子数/已完成子数`；状态推导顺序是
+  「全完成 → `Completed`；有子在跑 → `Downloading`；有失败且无在跑 → `Failed`/`DiskError`（错误文案取第一个失败的）；
+  有排队 → `Queued`；否则 `Paused`」。
+- **联动**：`Publish(childId)` 末尾按 `task.ParentId` 调 `RefreshContainer`，父行以 `TaskUpdated` 重新推送；
+  状态真变了才 `UpdateStatus` 落库，进度交给 30s 的 `PersistTick`（否则 12 个文件的 4Hz 事件会把库刷爆）。
+- **级联**：`Pause` / `Resume` / `Delete` 遇到父行时逐个作用到子任务；`Delete(parent)` 先删子再删父，
+  不会留下孤儿行。
+- **重启恢复**：`parent_id` 分组即父子关系——**有子行的才是父行**（首版按文件建的 HF 任务没有子行，
+  仍按普通任务显示，无需数据迁移）；父行不做「已完成文件是否存在」检查（它的 `file_name` 是仓库名），
+  状态与完成时间全部按子任务重算。
+- **UI**：`MainWindowViewModel.AddRange` 跳过 `ParentId != null` 的行，列表只有父行；
+  第二行中部由「段」换成「个文件」（`3/12 个文件 · D:\Downloads`），图标标签为「包」；
+  完成通知只按父行报一次。
 
 ### 12.3 BitTorrent（V3）
 

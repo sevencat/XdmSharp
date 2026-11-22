@@ -17,7 +17,11 @@ public interface IDownloadObserver
     /// <summary>进度（已落盘总量 / 瞬时速率 / 预计剩余）。</summary>
     void OnProgress(long id, long syncedTotal, double bytesPerSecond, TimeSpan? eta);
 
-    /// <summary>段表变化（切分 / 恢复 / 结束）。首期只在建段与暂停时发，详情窗口订阅。</summary>
+    /// <summary>
+    /// 段表结构变化（切分 / 恢复 / 结束；只在这些低频时机发，不跟进度节拍）。
+    /// 详情窗口不订阅它——那个窗口用 <c>DownloadManager.Segments</c> 按 250ms 拉快照，
+    /// 免得「窗口开着才有的事件」污染观察者接口。
+    /// </summary>
     void OnSegmentsChanged(long id, IReadOnlyList<SegmentSnapshot> segments);
 
     /// <summary>成功并已发布。</summary>

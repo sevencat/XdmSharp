@@ -14,9 +14,15 @@ internal sealed class MewDownloadActions(DownloadManager manager) : IDownloadAct
         }
     }
 
+    public void StartGroup(DownloadGroupRequest group) => manager.EnqueueGroup(group);
+
     public void Pause(long id) => manager.Pause(id);
 
     public void Resume(long id) => manager.Resume(id);
 
     public void Delete(long id, bool deleteFile) => manager.Delete(id, deleteFile);
+
+    public IReadOnlyList<SegmentSnapshot> Segments(long id) => manager.Segments(id);
+
+    public IReadOnlyList<DownloadRecord> Children(long id) => manager.Children(id);
 }

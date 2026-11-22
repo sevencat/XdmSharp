@@ -20,6 +20,7 @@ internal sealed class MewRuntime : IDisposable
     private readonly DownloadManager? _manager;
     private readonly ProxyHttpClientProvider? _proxyClients;
     private readonly SpeedLimiter? _limiter;
+    private readonly ConnectionSlots? _slots;
 
     private MewDownloadBridge? _bridge;
     private AppSettings _settings;
@@ -34,7 +35,8 @@ internal sealed class MewRuntime : IDisposable
         DbSettingsStore? settingsStore = null,
         DownloadManager? manager = null,
         ProxyHttpClientProvider? proxyClients = null,
-        SpeedLimiter? limiter = null)
+        SpeedLimiter? limiter = null,
+        ConnectionSlots? slots = null)
     {
         Paths = paths;
         IsDemo = isDemo;
@@ -45,6 +47,7 @@ internal sealed class MewRuntime : IDisposable
         _manager = manager;
         _proxyClients = proxyClients;
         _limiter = limiter;
+        _slots = slots;
     }
 
     public AppPaths Paths { get; }
@@ -109,6 +112,9 @@ internal sealed class MewRuntime : IDisposable
 
             var limiter = new SpeedLimiter(settings.SpeedLimitBytesPerSecond);
 
+            // 全局连接配额：所有任务共用一份，防止「任务数 × 段数」把连接打爆（ARCHITECTURE §12.2 第 6 条）。
+            var slots = new ConnectionSlots(settings.MaxConnections);
+
             // 一条代理一份连接池：任务按自己的代理路线取客户端（见 ProxyResolver）。
             var proxyClients = new ProxyHttpClientProvider();
             var manager = new DownloadManager(new DownloadManagerOptions
@@ -117,9 +123,11 @@ internal sealed class MewRuntime : IDisposable
                 Store = store,
                 ClientProvider = proxyClients,
                 MaxConcurrent = settings.MaxConcurrent,
+                MaxFilesPerTask = settings.MaxFilesPerTask,
                 EngineOptions = new DownloadEngineOptions
                 {
                     Limiter = limiter,
+                    ConnectionSlots = slots,
                     MaxRetries = settings.MaxRetries,
                     RetryBaseDelay = TimeSpan.FromMilliseconds(settings.RetryBaseDelayMs),
                 },
@@ -144,7 +152,8 @@ internal sealed class MewRuntime : IDisposable
                 settingsStore,
                 manager,
                 proxyClients,
-                limiter);
+                limiter,
+                slots);
 
             // 读 runtime.Settings 而不是捕获局部 settings：保存设置后新建/恢复的任务立刻按新代理表解析。
             manager.ResolveProxy = proxyId => ProxyResolver.Resolve(runtime.Settings, proxyId);
@@ -194,9 +203,13 @@ internal sealed class MewRuntime : IDisposable
         _settings = settings;
         _limiter?.SetRate(settings.SpeedLimitBytesPerSecond);
 
+        // 连接上限即时生效：调大立刻放行等待中的段，调小不打断在途连接（读完自然让出）。
+        _slots?.SetCapacity(settings.MaxConnections);
+
         if (_manager is not null)
         {
             _manager.MaxConcurrent = settings.MaxConcurrent;
+            _manager.MaxFilesPerTask = settings.MaxFilesPerTask;
             _manager.DefaultHeaders = settings.DefaultHeaders;
         }
 
@@ -218,6 +231,7 @@ internal sealed class MewRuntime : IDisposable
         _disposed = true;
         _bridge?.Dispose();
         _manager?.Dispose();
+        _slots?.Dispose();
         _proxyClients?.Dispose();
         _store?.Dispose();
     }

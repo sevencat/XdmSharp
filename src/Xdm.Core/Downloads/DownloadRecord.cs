@@ -5,8 +5,9 @@ namespace Xdm.Core.Downloads;
 /// （<c>ARCHITECTURE.md</c> §8）。
 /// </summary>
 /// <remarks>
-/// 多协议预留字段（<c>Kind</c> / <c>ParentId</c> / <c>Children</c> 语义）首期即定义，
-/// 首期 <c>ParentId</c> 恒为 <see langword="null"/>，见 <c>ARCHITECTURE.md</c> §12.1。
+/// 多文件任务（HF 模型包 / torrent）用「父行 + 子行」两层：父行 <see cref="IsContainer"/> 为真，
+/// 自身不下载，<see cref="SizeBytes"/> / <see cref="SyncedBytes"/> / <see cref="Status"/> 都由子任务汇总而来；
+/// 子行 <see cref="ParentId"/> 指向父行。见 <c>ARCHITECTURE.md</c> §12.1 契约 1/2。
 /// </remarks>
 public sealed record DownloadRecord
 {
@@ -40,8 +41,17 @@ public sealed record DownloadRecord
 
     public int CompletedSegments { get; init; }
 
-    /// <summary>父任务 id（V2 HF / V3 BT 的多文件任务用）；首期恒为 <see langword="null"/>。</summary>
+    /// <summary>父任务 id（多文件任务的子行才有）；单文件任务为 <see langword="null"/>。</summary>
     public long? ParentId { get; init; }
+
+    /// <summary>父行：自身不下载，进度/状态/速度都是子任务的汇总。</summary>
+    public bool IsContainer { get; init; }
+
+    /// <summary>父行下的文件数；非父行为 0。</summary>
+    public int ChildCount { get; init; }
+
+    /// <summary>父行下已完成的文件数；非父行为 0。</summary>
+    public int CompletedChildren { get; init; }
 
     /// <summary>完成时间（用于行内"已完成 2026-11-22 10:31"）。</summary>
     public DateTimeOffset? CompletedAt { get; init; }

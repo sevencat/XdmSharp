@@ -41,6 +41,12 @@ public enum DownloadError
 
     /// <summary>内部错误（不变量被破坏）。</summary>
     Internal,
+
+    /// <summary>
+    /// 落盘内容与来源给的摘要不符（HF 的 LFS sha256）。
+    /// 追加在末尾：本枚举按 int 存库，插到中间会让旧库的错误码错位。
+    /// </summary>
+    Checksum,
 }
 
 /// <summary>错误码 → 中文文案的唯一入口。</summary>
@@ -59,6 +65,7 @@ public static class DownloadErrorText
         DownloadError.Disk => "磁盘写入失败",
         DownloadError.TargetExists => "目标文件已存在",
         DownloadError.Cancelled => "已取消",
+        DownloadError.Checksum => "内容校验失败",
         _ => "未知错误",
     };
 }

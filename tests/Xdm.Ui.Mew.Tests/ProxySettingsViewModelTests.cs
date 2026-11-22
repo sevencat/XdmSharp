@@ -86,6 +86,23 @@ public sealed class ProxySettingsViewModelTests
     }
 
     [Fact]
+    public void FilesPerTask_RoundTrips_AndClamps()
+    {
+        // 读：设置里的值原样进控件。
+        var vm = NewViewModel(new AppSettings { DefaultSaveFolder = Path.GetTempPath(), MaxFilesPerTask = 2 });
+        Assert.Equal(2, vm.MaxFilesPerTask);
+
+        // 写：手输越界值在保存时夹紧（1–16）。
+        vm.MaxFilesPerTask = 99;
+        Assert.True(vm.TryBuild(out var settings), vm.ErrorText);
+        Assert.Equal(16, settings.MaxFilesPerTask);
+
+        vm.MaxFilesPerTask = 0;
+        Assert.True(vm.TryBuild(out settings), vm.ErrorText);
+        Assert.Equal(1, settings.MaxFilesPerTask);
+    }
+
+    [Fact]
     public void DefaultProxyIndex_ReflectsExistingDefault()
     {
         var settings = new AppSettings

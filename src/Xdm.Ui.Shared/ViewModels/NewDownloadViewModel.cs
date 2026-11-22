@@ -63,6 +63,12 @@ public sealed class NewDownloadViewModel : ViewModelBase
         set => SetProperty(ref _selectedProxyIndex, value);
     }
 
+    /// <summary>当前选中的代理 id（越界/未配置按默认代理处理，即 <see langword="null"/>）。</summary>
+    public string? SelectedProxyId =>
+        SelectedProxyIndex >= 0 && SelectedProxyIndex < ProxyChoices.Count
+            ? ProxyChoices[SelectedProxyIndex].ProxyId
+            : null;
+
     public string ErrorText
     {
         get => _errorText;
@@ -114,9 +120,7 @@ public sealed class NewDownloadViewModel : ViewModelBase
         }
 
         var segments = (int)Math.Clamp(Segments, 1, 256);
-        var proxyId = SelectedProxyIndex >= 0 && SelectedProxyIndex < ProxyChoices.Count
-            ? ProxyChoices[SelectedProxyIndex].ProxyId
-            : null;
+        var proxyId = SelectedProxyId;
         var created = new List<DownloadRequest>(urls.Count);
 
         foreach (var text in urls)

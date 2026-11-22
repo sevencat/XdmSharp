@@ -23,6 +23,8 @@ public sealed class SettingsDialog : Window
 
     private readonly NumericUpDown _segmentsBox;
     private readonly NumericUpDown _concurrentBox;
+    private readonly NumericUpDown _connectionsBox;
+    private readonly NumericUpDown _filesPerTaskBox;
     private readonly CheckBox _speedLimitBox;
     private readonly NumericUpDown _speedLimitValue;
     private readonly NumericUpDown _retriesBox;
@@ -33,6 +35,8 @@ public sealed class SettingsDialog : Window
     private readonly List<ProxyRowControls> _proxyRows = [];
     private readonly List<(int Index, RadioButton Button)> _defaultProxyRadios = [];
     private readonly MultiLineTextBox _headersBox;
+    private readonly TextBox _hfEndpointBox;
+    private readonly TextBox _hfTokenBox;
     private readonly CheckBox _notifyBox;
     private readonly TextBlock _errorText;
 
@@ -51,6 +55,8 @@ public sealed class SettingsDialog : Window
 
         _segmentsBox = NumberBox(1, 256, 1, (double)_vm.MaxSegments, 150);
         _concurrentBox = NumberBox(1, 32, 1, (double)_vm.MaxConcurrent, 150);
+        _connectionsBox = NumberBox(1, 256, 1, (double)_vm.MaxConnections, 150);
+        _filesPerTaskBox = NumberBox(1, 16, 1, (double)_vm.MaxFilesPerTask, 150);
         _speedLimitBox = new CheckBox().Content("启用全局限速").FontSize(12);
         _speedLimitBox.IsChecked = _vm.SpeedLimitEnabled;
         _speedLimitValue = NumberBox(1, (double)SettingsViewModel.MaxSpeedKbps, 64, (double)_vm.SpeedLimitKbps, 170);
@@ -88,6 +94,11 @@ public sealed class SettingsDialog : Window
         _headersBox.Text = _vm.DefaultHeadersText;
         EditBox.AttachMenu(_headersBox);
 
+        _hfEndpointBox = EditBox.Create();
+        _hfEndpointBox.Text = _vm.HuggingFaceEndpoint;
+        _hfTokenBox = EditBox.Create();
+        _hfTokenBox.Text = _vm.HuggingFaceToken;
+
         // 先按现有代理建行，再生成「默认代理」单选（顺序与 _vm.DefaultProxyIndex 约定一致：0 系统、1 直连、2+i 第 i 行）。
         foreach (var row in _vm.Proxies)
         {
@@ -101,7 +112,8 @@ public sealed class SettingsDialog : Window
 
         RebuildDefaultProxyOptions();
 
-        // 内容区不滚动：四页最长的一页（网络：代理列表 + 默认代理单选 + 请求头）也放得下 620×640。
+        // 每页内容各自滚动（见 Tab 工厂）：网络页塞了代理表 + 默认代理 + 请求头 + HuggingFace 两行，
+        // 定高不滚动会把它裁掉。
         var tabs = new TabControl().TabItems(
             Tab("常规",
                 Section("界面语言", HintCombo("简体中文", "English")),
@@ -112,6 +124,8 @@ public sealed class SettingsDialog : Window
             Tab("连接",
                 Section("新任务默认分段数", _segmentsBox),
                 Section("同时下载任务数", _concurrentBox),
+                Section("全局连接上限（所有任务的所有分段合计）", _connectionsBox),
+                Section("每个多文件任务同时下载的文件数", _filesPerTaskBox),
                 Section("", null, _speedLimitBox,
                     new StackPanel()
                         .Horizontal()
@@ -145,6 +159,8 @@ public sealed class SettingsDialog : Window
                             .OnClick(OnAddProxy))),
                 Section("默认代理", _defaultProxyPanel),
                 Section("默认请求头（每行一条「名称: 值」）", _headersBox),
+                Section("HuggingFace 站点（可填镜像，如 https://hf-mirror.com）", _hfEndpointBox),
+                Section("HuggingFace 令牌（私有/gated 仓库；留空则读环境变量 HF_TOKEN）", _hfTokenBox),
                 Text("代理与请求头保存后即时生效：新任务按新代理表解析，已建任务仍走建任务时的路线。")));
 
         _errorText = new TextBlock()
@@ -197,10 +213,16 @@ public sealed class SettingsDialog : Window
     // ── 控件工厂 ─────────────────────────────────────────────────────────────
 
     // TabControl.AddTab 要求 Header 元素非空：只设 HeaderText 会在加页签时抛 ArgumentException。
+    // 页内容包一层 ScrollViewer：代理表 + HuggingFace 段加进来后任何页都可能超出一屏。
     private static TabItem Tab(string header, params Element[] content) =>
         new TabItem()
             .Header(new TextBlock().Text(header).FontSize(12).Foreground(MewTheme.TextPrimary))
-            .Content(new StackPanel().Spacing(12).Padding(14, 12).Children(content));
+            .Content(new ScrollViewer
+            {
+                VerticalScroll = ScrollMode.Auto,
+                HorizontalScroll = ScrollMode.Disabled,
+                Content = new StackPanel().Spacing(12).Padding(14, 12).Children(content),
+            });
 
     /// <summary>一「段」：可选标题 + 内容；<paramref name="extra"/> 用在同一段里放多行（如限速）。</summary>
     private static StackPanel Section(string title, Element? body, params Element[] extra)
@@ -420,6 +442,8 @@ public sealed class SettingsDialog : Window
         // 控件 → ViewModel（按页签顺序，与 Avalonia 版双向绑定等价）。
         _vm.MaxSegments = (decimal)_segmentsBox.Value;
         _vm.MaxConcurrent = (decimal)_concurrentBox.Value;
+        _vm.MaxConnections = (decimal)_connectionsBox.Value;
+        _vm.MaxFilesPerTask = (decimal)_filesPerTaskBox.Value;
         _vm.SpeedLimitEnabled = _speedLimitBox.IsChecked == true;
         _vm.SpeedLimitKbps = (decimal)_speedLimitValue.Value;
         _vm.MaxRetries = (decimal)_retriesBox.Value;
@@ -440,6 +464,8 @@ public sealed class SettingsDialog : Window
 
         _vm.DefaultProxyIndex = SelectedDefaultProxyIndex();
         _vm.DefaultHeadersText = _headersBox.Text;
+        _vm.HuggingFaceEndpoint = _hfEndpointBox.Text;
+        _vm.HuggingFaceToken = _hfTokenBox.Text;
         _vm.NotifyOnComplete = _notifyBox.IsChecked == true;
 
         if (!_vm.TryBuild(out var settings))

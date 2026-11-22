@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using Xdm.Core.Errors;
 using Xdm.Core.Http;
+using Xdm.Core.Scheduling;
 using Xdm.Core.Storage;
 
 namespace Xdm.Core.Downloads;
@@ -69,6 +70,8 @@ internal sealed class SegmentRunner
 
             try
             {
+                // 全局连接配额：名额覆盖「发请求 → 读完响应体 → 关连接」整段，重试 / 取消都由 using 归还。
+                using var lease = ConnectionSlots.AcquireLease(_options.ConnectionSlots, cancellationToken);
                 using var response = _client.Send(request, cancellationToken);
                 var info = response.Info;
 
@@ -258,7 +261,18 @@ internal sealed class SegmentRunner
             return;
         }
 
-        if (cancellationToken.WaitHandle.WaitOne(delay))
+        bool cancelled;
+        try
+        {
+            cancelled = cancellationToken.WaitHandle.WaitOne(delay);
+        }
+        catch (ObjectDisposedException)
+        {
+            // 任务收尾已经释放 CTS：按取消处理，别让段线程抛未捕获异常。
+            cancelled = true;
+        }
+
+        if (cancelled)
         {
             cancellationToken.ThrowIfCancellationRequested();
         }

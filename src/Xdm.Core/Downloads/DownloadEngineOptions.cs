@@ -8,6 +8,12 @@ public sealed class DownloadEngineOptions
     /// <summary>全局限速器；为空表示不限速。多个任务应共享同一个实例。</summary>
     public SpeedLimiter? Limiter { get; init; }
 
+    /// <summary>
+    /// 全局连接配额（同时在途的 HTTP 连接上限）；为空表示不限。
+    /// 与 <see cref="Limiter"/> 一样，多个任务应共享同一个实例，否则"全局"名不副实。
+    /// </summary>
+    public ConnectionSlots? ConnectionSlots { get; init; }
+
     /// <summary>段数上限的引擎侧闸门（任务自身的 <see cref="DownloadTask.MaxSegments"/> 再与之取小）。</summary>
     public int MaxSegments { get; init; } = 8;
 

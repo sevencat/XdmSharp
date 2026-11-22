@@ -1,5 +1,9 @@
+using System.Net;
+using System.Net.Http;
 using Aprillz.MewUI.Controls;
 using Xdm.Core.Configuration;
+using Xdm.Core.Downloads;
+using Xdm.Core.HuggingFace;
 using Xdm.Ui.Mew.Dialogs;
 using Xdm.Ui.ViewModels;
 
@@ -147,6 +151,138 @@ public class NewDownloadDialogTests
         Assert.Equal(2, VisualTree.Descendants(dialog.Content).OfType<RadioButton>().Count());
         Assert.True(dialog.Submit());
         Assert.Null(Assert.Single(dialog.Requests!).ProxyId);
+    }
+
+    // ── HuggingFace 页 ────────────────────────────────────────────────────
+
+    [Fact]
+    public void HuggingFace_Submit_Builds_One_Request_Per_Selected_File()
+    {
+        var folder = NewTempFolder();
+        var dialog = NewHuggingFaceDialog(folder);
+
+        Assert.True(dialog.HuggingFace.LoadFiles(TestContext.Current.CancellationToken));
+        dialog.SelectHuggingFaceTab();
+        dialog.RefreshHuggingFaceFiles();   // 拉取成功后默认全选
+
+        Assert.True(dialog.Submit());
+
+        // 一个模型包 = 一条父行 + 每文件一条子任务（列表里只显示父行）。
+        Assert.Null(dialog.Requests);
+        var group = dialog.Group!;
+        Assert.Equal("owner/name", group.Name);
+        Assert.Equal(TaskKind.HuggingFace, group.Kind);
+        Assert.Equal(Path.Combine(folder, "owner", "name"), group.TargetFolder);
+        Assert.Equal(2, group.Files.Count);
+        Assert.All(group.Files, request => Assert.Equal(TaskKind.HuggingFace, request.Kind));
+        Assert.Equal(
+            "https://hf.test/owner/name/resolve/main/onnx/model.onnx?download=true",
+            group.Files[1].Url);
+        Assert.Equal(Path.Combine(folder, "owner", "name", "onnx"), group.Files[1].TargetFolder);
+        Assert.Equal("huggingface", KindOf(group.Files[1]));
+    }
+
+    [Fact]
+    public void HuggingFace_Submit_Without_Selection_Reports_Hint()
+    {
+        var folder = NewTempFolder();
+        var dialog = NewHuggingFaceDialog(folder);
+
+        Assert.True(dialog.HuggingFace.LoadFiles(TestContext.Current.CancellationToken));
+        dialog.SelectHuggingFaceTab();
+        dialog.RefreshHuggingFaceFiles();
+        dialog.ClearHuggingFaceSelection();
+
+        Assert.False(dialog.Submit());
+        Assert.Null(dialog.Requests);
+        Assert.True(VisualTree.ContainsText(dialog.Content, dialog.HuggingFace.StatusText));
+    }
+
+    [Fact]
+    public void HuggingFace_Submit_Uses_Selected_Proxy()
+    {
+        var folder = NewTempFolder();
+        var dialog = NewHuggingFaceDialog(folder);
+
+        Assert.True(dialog.HuggingFace.LoadFiles(TestContext.Current.CancellationToken));
+        dialog.SelectHuggingFaceTab();
+        dialog.RefreshHuggingFaceFiles();
+        VisualTree.Descendants(dialog.Content).OfType<RadioButton>().ElementAt(2).IsChecked = true;
+
+        Assert.True(dialog.Submit());
+        Assert.All(dialog.Group!.Files, request => Assert.Equal("corp", request.ProxyId));
+        Assert.Equal("corp", dialog.Group!.ProxyId);
+    }
+
+    [Fact]
+    public void HuggingFace_Submit_Rejects_Missing_SaveFolder()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "xdm-missing-" + Guid.NewGuid().ToString("N"));
+        var dialog = NewHuggingFaceDialog(missing);
+
+        Assert.True(dialog.HuggingFace.LoadFiles(TestContext.Current.CancellationToken));
+        dialog.SelectHuggingFaceTab();
+        dialog.RefreshHuggingFaceFiles();
+
+        Assert.False(dialog.Submit());
+        Assert.Null(dialog.Requests);
+    }
+
+    private static string KindOf(DownloadRequest request)
+    {
+        using var meta = System.Text.Json.JsonDocument.Parse(request.SourceMetaJson!);
+        return meta.RootElement.GetProperty("kind").GetString()!;
+    }
+
+    private static string NewTempFolder()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "xdm-hf-dlg-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        return folder;
+    }
+
+    private static NewDownloadDialog NewHuggingFaceDialog(string saveFolder)
+    {
+        var settings = new AppSettings
+        {
+            Proxies = [new ProxyProfile { Id = "corp", Name = "公司代理", Url = "http://127.0.0.1:7890" }],
+            DefaultProxyId = "corp",
+        };
+
+        var client = new HfHubClient(new HttpClient(new FixedJsonHandler("""
+            [
+              { "type": "file", "path": "config.json", "size": 100 },
+              { "type": "file", "path": "onnx/model.onnx", "size": 200 }
+            ]
+            """)));
+
+        var dialog = new NewDownloadDialog(
+            null,
+            saveFolder,
+            4,
+            ProxyChoice.Build(settings),
+            "https://hf.test",
+            null,
+            client);
+
+        dialog.HuggingFace.Repo = "owner/name";
+        return dialog;
+    }
+
+    private sealed class FixedJsonHandler(string json) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            _ = request;
+            _ = cancellationToken;
+
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(json),
+            });
+        }
     }
 
     private static NewDownloadDialog NewWithProxies()

@@ -65,7 +65,13 @@ internal sealed class MewDownloadBridge : IDisposable
 
     private void OnTaskAdded(DownloadRecord record) => Post(() =>
     {
-        _completion.Observe(record.Id, record.Status);
+        // 子行（模型包里的单个文件）不参与「下载完成」通知，否则 12 个文件报 12 次；
+        // 父行完成时会自己报一次。
+        if (record.ParentId is null)
+        {
+            _completion.Observe(record.Id, record.Status);
+        }
+
         _viewModel.Add(record);
     });
 
@@ -92,6 +98,12 @@ internal sealed class MewDownloadBridge : IDisposable
             }
 
             _viewModel.UpdateRow(record);
+
+            if (record.ParentId is not null)
+            {
+                // 子文件的状态变化已经在父行汇总里体现，不单独报喜。
+                continue;
+            }
 
             // 只在「非完成 → 完成」这一跳报一次：引擎会重复推送同状态的记录。
             if (_completion.Observe(id, record.Status))

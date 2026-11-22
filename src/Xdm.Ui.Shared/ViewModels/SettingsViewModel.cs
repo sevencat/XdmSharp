@@ -19,6 +19,8 @@ public sealed class SettingsViewModel : ViewModelBase
 
     private decimal _maxConcurrent;
     private decimal _maxSegments;
+    private decimal _maxConnections;
+    private decimal _maxFilesPerTask;
     private bool _speedLimitEnabled;
     private decimal _speedLimitKbps;
     private int _defaultProxyIndex;
@@ -27,6 +29,8 @@ public sealed class SettingsViewModel : ViewModelBase
     private decimal _maxRetries;
     private decimal _retryBaseDelayMs;
     private string _defaultHeadersText;
+    private string _hfEndpoint;
+    private string _hfToken;
     private string _errorText = string.Empty;
 
     public SettingsViewModel(AppSettings settings, string dbPath)
@@ -36,6 +40,8 @@ public sealed class SettingsViewModel : ViewModelBase
 
         _maxConcurrent = settings.MaxConcurrent;
         _maxSegments = settings.MaxSegments;
+        _maxConnections = settings.MaxConnections;
+        _maxFilesPerTask = settings.MaxFilesPerTask;
         _speedLimitEnabled = settings.SpeedLimitBytesPerSecond > 0;
         _speedLimitKbps = settings.SpeedLimitBytesPerSecond > 0
             ? Math.Max(1m, Math.Round(settings.SpeedLimitBytesPerSecond / 1024m, 1))
@@ -49,6 +55,8 @@ public sealed class SettingsViewModel : ViewModelBase
         _defaultHeadersText = string.Join(
             Environment.NewLine,
             settings.DefaultHeaders.Select(static h => $"{h.Key}: {h.Value}"));
+        _hfEndpoint = settings.HuggingFaceEndpoint;
+        _hfToken = settings.HuggingFaceToken ?? string.Empty;
 
         DbPath = dbPath;
     }
@@ -71,6 +79,20 @@ public sealed class SettingsViewModel : ViewModelBase
     {
         get => _maxSegments;
         set => SetProperty(ref _maxSegments, value);
+    }
+
+    /// <summary>全局连接上限（1–256）：所有任务的所有分段同时在途的连接总数。</summary>
+    public decimal MaxConnections
+    {
+        get => _maxConnections;
+        set => SetProperty(ref _maxConnections, value);
+    }
+
+    /// <summary>单个多文件任务（HF 模型包）里同时下载的文件数（1–16）。</summary>
+    public decimal MaxFilesPerTask
+    {
+        get => _maxFilesPerTask;
+        set => SetProperty(ref _maxFilesPerTask, value);
     }
 
     /// <summary>是否启用全局限速。</summary>
@@ -132,6 +154,20 @@ public sealed class SettingsViewModel : ViewModelBase
         set => SetProperty(ref _defaultHeadersText, value ?? string.Empty);
     }
 
+    /// <summary>HuggingFace 站点根（可填镜像）；保存时归一，非法值回默认站点。</summary>
+    public string HuggingFaceEndpoint
+    {
+        get => _hfEndpoint;
+        set => SetProperty(ref _hfEndpoint, value ?? string.Empty);
+    }
+
+    /// <summary>HuggingFace 令牌（私有 / gated 仓库）；留空则读环境变量 <c>HF_TOKEN</c>。</summary>
+    public string HuggingFaceToken
+    {
+        get => _hfToken;
+        set => SetProperty(ref _hfToken, value ?? string.Empty);
+    }
+
     public string ErrorText
     {
         get => _errorText;
@@ -175,6 +211,8 @@ public sealed class SettingsViewModel : ViewModelBase
 
         settings.MaxConcurrent = (int)Math.Clamp(MaxConcurrent, 1, 32);
         settings.MaxSegments = (int)Math.Clamp(MaxSegments, 1, 256);
+        settings.MaxConnections = (int)Math.Clamp(MaxConnections, 1, 256);
+        settings.MaxFilesPerTask = (int)Math.Clamp(MaxFilesPerTask, 1, 16);
         settings.SpeedLimitBytesPerSecond = SpeedLimitEnabled
             ? (long)Math.Round(Math.Clamp(SpeedLimitKbps, 1, MaxSpeedKbps) * 1024m)
             : 0;
@@ -186,6 +224,10 @@ public sealed class SettingsViewModel : ViewModelBase
         settings.ProxyUrl = null;
 
         settings.DefaultHeaders = headers;
+
+        // 站点地址手打完多半带尾斜杠/空格，交给 Normalized 统一归一（非法回默认站点）。
+        settings.HuggingFaceEndpoint = AppSettings.SanitizeEndpoint(HuggingFaceEndpoint);
+        settings.HuggingFaceToken = AppSettings.SanitizeToken(HuggingFaceToken);
         settings.DefaultSaveFolder = folder;
         settings.NotifyOnComplete = NotifyOnComplete;
         settings.MaxRetries = (int)Math.Clamp(MaxRetries, 0, 10);

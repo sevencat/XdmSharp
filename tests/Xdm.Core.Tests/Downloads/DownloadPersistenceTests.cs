@@ -191,10 +191,12 @@ public sealed class DownloadPersistenceTests
         using var harness = new EngineHarness();
         using var store = new TaskStore(Path.Combine(harness.Root, "xdm.db"));
         var bytes = EngineHarness.MakeBytes(4_000_000);
+
+        // 慢一点：用例要在"下载中"这个窗口里关掉管理器，太快会被并行跑的其它用例抢 CPU 抢成"已完成"。
         harness.Server.AddFile(
             "/big.bin",
             bytes,
-            new FileBehavior { ChunkSize = 16 * 1024, PerChunkDelay = TimeSpan.FromMilliseconds(5) });
+            new FileBehavior { ChunkSize = 16 * 1024, PerChunkDelay = TimeSpan.FromMilliseconds(20) });
 
         long id;
         using (var manager = CreateManager(harness, store, persistInterval: TimeSpan.FromMilliseconds(80)))

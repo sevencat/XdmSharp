@@ -5,7 +5,10 @@ using Xdm.Ui.Formatting;
 
 namespace Xdm.Ui.ViewModels;
 
-/// <summary>列表行（`UI-DESIGN.md` §4）。字段按"父行 + 可选子行"形状定义，首期子集合恒为空。</summary>
+/// <summary>
+/// 列表行（`UI-DESIGN.md` §4）。多文件任务只渲染父行（子行不单独出列表），
+/// 父行的进度/速度/状态由引擎汇总成一条 <see cref="DownloadRecord"/>。
+/// </summary>
 public sealed class DownloadRowViewModel : ViewModelBase
 {
     private DownloadRecord _record;
@@ -35,11 +38,17 @@ public sealed class DownloadRowViewModel : ViewModelBase
 
     public string TargetFolder => _record.TargetFolder;
 
-    /// <summary>扩展名（大写，不含点），用于行左图标；无扩展名时为 <c>文件</c>。</summary>
+    /// <summary>扩展名（大写，不含点），用于行左图标；无扩展名时为 <c>文件</c>，父行是 <c>包</c>。</summary>
     public string Extension
     {
         get
         {
+            if (IsContainer)
+            {
+                // 仓库名里常带版本号点号（Qwen2.5-7B），按扩展名取会显示成 "5-7B"。
+                return "包";
+            }
+
             var ext = Path.GetExtension(_record.FileName);
             return ext.Length > 1 ? ext[1..Math.Min(5, ext.Length)].ToUpperInvariant() : "文件";
         }
@@ -51,7 +60,10 @@ public sealed class DownloadRowViewModel : ViewModelBase
 
     public bool IsChild => !IsParent;
 
-    /// <summary>V2/V3 的多文件子任务；首期恒为空。</summary>
+    /// <summary>多文件任务的父行（HF 模型包）：第二行显示「文件数」，不是「段数」。</summary>
+    public bool IsContainer => _record.IsContainer;
+
+    /// <summary>多文件子任务的子行；列表里不显示，留给以后的展开视图。</summary>
     public ObservableCollection<DownloadRowViewModel> Children { get; } = [];
 
     /// <summary>0..1；按 ≥1% 变化才通知（`UI-DESIGN.md` §4 进度刷新约束）。</summary>
@@ -76,12 +88,26 @@ public sealed class DownloadRowViewModel : ViewModelBase
 
     public string RemainingText => _record.IsActive ? TextFormat.Remaining(_record.RemainingSeconds) : string.Empty;
 
-    /// <summary>第二行中部：进行中 `3/12 段 · D:\Downloads`；完成态 `D:\Downloads · 完成于 …`。</summary>
-    public string SegmentAndFolderText => IsCompleted
-        ? (_record.CompletedAt is null
-            ? _record.TargetFolder
-            : $"{_record.TargetFolder} · 完成于 {TextFormat.CompletedAt(_record.CompletedAt)}")
-        : $"{_record.CompletedSegments}/{_record.SegmentCount} 段 · {_record.TargetFolder}";
+    /// <summary>
+    /// 第二行中部：进行中 `3/12 段 · D:\Downloads`；完成态 `D:\Downloads · 完成于 …`；
+    /// 父行把「段」换成「个文件」。
+    /// </summary>
+    public string SegmentAndFolderText
+    {
+        get
+        {
+            if (IsCompleted)
+            {
+                return _record.CompletedAt is null
+                    ? _record.TargetFolder
+                    : $"{_record.TargetFolder} · 完成于 {TextFormat.CompletedAt(_record.CompletedAt)}";
+            }
+
+            return IsContainer
+                ? $"{_record.CompletedChildren}/{_record.ChildCount} 个文件 · {_record.TargetFolder}"
+                : $"{_record.CompletedSegments}/{_record.SegmentCount} 段 · {_record.TargetFolder}";
+        }
+    }
 
     /// <summary>状态徽标文案（唯一来源，便于测试断言）。</summary>
     public string StatusText => DescribeStatus(_record);

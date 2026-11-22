@@ -1,3 +1,4 @@
+using Xdm.Core.HuggingFace;
 using Xdm.Core.Http;
 
 namespace Xdm.Core.Configuration;
@@ -11,14 +12,32 @@ namespace Xdm.Core.Configuration;
 /// </remarks>
 public sealed class AppSettings
 {
-    /// <summary>当前设置文件结构版本（2 起：单代理 → 具名代理列表）。</summary>
-    public const int CurrentSchemaVersion = 2;
+    /// <summary>
+    /// 当前设置文件结构版本（2 起：单代理 → 具名代理列表；3 起：加 HuggingFace 站点/令牌；
+    /// 4 起：加全局连接上限 <see cref="MaxConnections"/>；5 起：加单任务文件并发
+    /// <see cref="MaxFilesPerTask"/>）。
+    /// </summary>
+    public const int CurrentSchemaVersion = 5;
 
     /// <summary>同时下载的任务数上限（1–32）。</summary>
     public int MaxConcurrent { get; set; } = 3;
 
     /// <summary>新任务的默认分段数（1–256）。</summary>
     public int MaxSegments { get; set; } = 8;
+
+    /// <summary>
+    /// 全局连接上限（1–256）：所有任务的所有分段同时在途的 HTTP 连接总数，防止
+    /// 「任务数 × 段数」打爆路由器（见 <c>ARCHITECTURE.md</c> §12.2 第 6 条）。
+    /// 默认 32，刚好覆盖默认的 3 任务 × 8 段，不改变默认行为。
+    /// </summary>
+    public int MaxConnections { get; set; } = 32;
+
+    /// <summary>
+    /// 单个多文件任务（HF 模型包）里同时下载的文件数（1–16，默认 3）。
+    /// HF 一个模型动辄几百个文件，若全丢进队列会长时间占满任务槽位、把小任务饿死；
+    /// 这里是「同一父行下最多几个子任务在跑」的闸门（见 <c>ARCHITECTURE.md</c> §6.2）。
+    /// </summary>
+    public int MaxFilesPerTask { get; set; } = 3;
 
     /// <summary>全局限速（字节/秒）；0 表示不限速。</summary>
     public long SpeedLimitBytesPerSecond { get; set; }
@@ -41,6 +60,14 @@ public sealed class AppSettings
     /// <summary>所有任务共享的默认请求头（任务级同名头优先）。</summary>
     public Dictionary<string, string> DefaultHeaders { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>HuggingFace 站点根；填镜像（如 <c>https://hf-mirror.com</c>）时清单与文件都走它。</summary>
+    public string HuggingFaceEndpoint { get; set; } = HfRepo.DefaultEndpoint;
+
+    /// <summary>
+    /// HuggingFace 访问令牌（私有 / gated 仓库需要）；留空时再读环境变量 <c>HF_TOKEN</c>。
+    /// </summary>
+    public string? HuggingFaceToken { get; set; }
+
     /// <summary>新建任务的默认保存目录；为空时用用户 Downloads。</summary>
     public string? DefaultSaveFolder { get; set; }
 
@@ -62,12 +89,16 @@ public sealed class AppSettings
         SchemaVersion = SchemaVersion,
         MaxConcurrent = MaxConcurrent,
         MaxSegments = MaxSegments,
+        MaxConnections = MaxConnections,
+        MaxFilesPerTask = MaxFilesPerTask,
         SpeedLimitBytesPerSecond = SpeedLimitBytesPerSecond,
         Proxies = [.. Proxies],
         DefaultProxyId = DefaultProxyId,
         ProxyMode = ProxyMode,
         ProxyUrl = ProxyUrl,
         DefaultHeaders = new Dictionary<string, string>(DefaultHeaders, StringComparer.OrdinalIgnoreCase),
+        HuggingFaceEndpoint = HuggingFaceEndpoint,
+        HuggingFaceToken = HuggingFaceToken,
         DefaultSaveFolder = DefaultSaveFolder,
         NotifyOnComplete = NotifyOnComplete,
         MaxRetries = MaxRetries,
@@ -91,6 +122,8 @@ public sealed class AppSettings
             SchemaVersion = Math.Max(CurrentSchemaVersion, SchemaVersion),
             MaxConcurrent = Math.Clamp(MaxConcurrent, 1, 32),
             MaxSegments = Math.Clamp(MaxSegments, 1, 256),
+            MaxConnections = Math.Clamp(MaxConnections, 1, 256),
+            MaxFilesPerTask = Math.Clamp(MaxFilesPerTask, 1, 16),
             SpeedLimitBytesPerSecond = Math.Clamp(SpeedLimitBytesPerSecond, 0, 1024L * 1024 * 1024),
             Proxies = proxies,
             DefaultProxyId = defaultProxyId,
@@ -100,6 +133,8 @@ public sealed class AppSettings
             ProxyUrl = null,
 
             DefaultHeaders = SanitizeHeaders(DefaultHeaders),
+            HuggingFaceEndpoint = SanitizeEndpoint(HuggingFaceEndpoint),
+            HuggingFaceToken = SanitizeToken(HuggingFaceToken),
             DefaultSaveFolder = string.IsNullOrWhiteSpace(DefaultSaveFolder) ? null : DefaultSaveFolder.Trim(),
             NotifyOnComplete = NotifyOnComplete,
             MaxRetries = Math.Clamp(MaxRetries, 0, 10),
@@ -117,6 +152,31 @@ public sealed class AppSettings
 
         return Uri.TryCreate(proxyUrl.Trim(), UriKind.Absolute, out var uri)
                && uri.Scheme is "http" or "https" or "socks4" or "socks4a" or "socks5";
+    }
+
+    /// <summary>HuggingFace 站点根清洗：非 http/https 回默认站点，去掉尾斜杠与 query/fragment。</summary>
+    public static string SanitizeEndpoint(string? endpoint)
+    {
+        var text = (endpoint ?? string.Empty).Trim();
+        if (text.Length == 0 || !Uri.TryCreate(text, UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("http" or "https"))
+        {
+            return HfRepo.DefaultEndpoint;
+        }
+
+        return $"{uri.Scheme}://{uri.Authority}{uri.AbsolutePath.TrimEnd('/')}";
+    }
+
+    /// <summary>token 清洗：去空白；含控制字符或空格（手改配置粘坏了）整条丢弃。</summary>
+    public static string? SanitizeToken(string? token)
+    {
+        var text = (token ?? string.Empty).Trim();
+        if (text.Length == 0 || text.Length > 4096)
+        {
+            return null;
+        }
+
+        return text.Any(static c => char.IsControl(c) || char.IsWhiteSpace(c)) ? null : text;
     }
 
     /// <summary>

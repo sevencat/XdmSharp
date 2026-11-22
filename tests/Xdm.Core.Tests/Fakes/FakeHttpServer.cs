@@ -71,10 +71,13 @@ public sealed class FakeHttpServer : IDisposable
         public long DropOnceRemaining = behavior.DropAfterBytes ?? 0;
     }
 
+    private sealed record FakeText(string Body, int StatusCode, IReadOnlyDictionary<string, string>? Headers);
+
     private readonly TcpListener _listener;
     private readonly Thread _acceptThread;
     private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentDictionary<string, FakeFile> _files = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, FakeText> _texts = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<RecordedRequest> _requests = new();
 
     public FakeHttpServer()
@@ -111,6 +114,12 @@ public sealed class FakeHttpServer : IDisposable
 
         _files[key] = new FakeFile(content, behavior ?? new FileBehavior());
     }
+
+    /// <summary>
+    /// 注册一个文本响应（JSON API 用）。查询串不参与匹配：<c>/api/x?y=1</c> 命中的是 <c>/api/x</c>。
+    /// </summary>
+    public void AddText(string path, string body, int statusCode = 200, IReadOnlyDictionary<string, string>? headers = null)
+        => _texts[Normalize(path)] = new FakeText(body, statusCode, headers);
 
     /// <summary>清掉请求记录（一个用例里分阶段断言时用）。</summary>
     public void ResetRequests()
@@ -165,6 +174,7 @@ public sealed class FakeHttpServer : IDisposable
 
                 var parts = lines[0].Split(' ');
                 var rawPath = parts.Length > 1 ? parts[1] : "/";
+                var fullPath = rawPath;
                 var query = rawPath.IndexOf('?');
                 if (query >= 0)
                 {
@@ -184,6 +194,18 @@ public sealed class FakeHttpServer : IDisposable
                 headers.TryGetValue("Range", out var range);
                 headers.TryGetValue("If-Range", out var ifRange);
                 _requests.Enqueue(new RecordedRequest(rawPath, range, ifRange, headers));
+
+                // 文本响应先按「含查询串」的完整路径找，再退回不带查询串的路径。
+                if (!_texts.TryGetValue(fullPath, out var text) && !_texts.TryGetValue(rawPath, out text))
+                {
+                    text = null;
+                }
+
+                if (text is not null)
+                {
+                    WriteText(stream, text);
+                    return;
+                }
 
                 if (!_files.TryGetValue(rawPath, out var file))
                 {
@@ -286,6 +308,27 @@ public sealed class FakeHttpServer : IDisposable
                 Thread.Sleep(behavior.PerChunkDelay);
             }
         }
+    }
+
+    private static void WriteText(NetworkStream stream, FakeText text)
+    {
+        var body = Encoding.UTF8.GetBytes(text.Body);
+        var builder = new StringBuilder();
+        builder.Append("HTTP/1.1 ").Append(text.StatusCode)
+            .Append(text.StatusCode == 200 ? " OK" : " Error").Append("\r\n");
+        builder.Append("Content-Type: application/json; charset=utf-8\r\n");
+        builder.Append("Content-Length: ").Append(body.Length).Append("\r\n");
+        if (text.Headers is { Count: > 0 })
+        {
+            foreach (var (name, value) in text.Headers)
+            {
+                builder.Append(name).Append(": ").Append(value).Append("\r\n");
+            }
+        }
+
+        builder.Append("Connection: close\r\n\r\n");
+        stream.Write(Encoding.ASCII.GetBytes(builder.ToString()));
+        stream.Write(body);
     }
 
     private static void WriteStatus(NetworkStream stream, string statusLine, int? retryAfterSeconds = null)

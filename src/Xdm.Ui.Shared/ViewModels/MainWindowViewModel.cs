@@ -135,9 +135,22 @@ public sealed class MainWindowViewModel : ViewModelBase
 
     public void AddRange(IEnumerable<DownloadRecord> records)
     {
+        var changed = false;
         foreach (var record in records)
         {
+            // 子行不单独出列表：父行已经把它们的进度/状态汇总了（`ARCHITECTURE.md` §12.1 契约 2）。
+            if (record.ParentId is not null)
+            {
+                continue;
+            }
+
             _all.Add(new DownloadRowViewModel(record, TogglePause, Delete, OpenFolder));
+            changed = true;
+        }
+
+        if (!changed)
+        {
+            return;
         }
 
         RefreshCounts();
@@ -253,6 +266,32 @@ public sealed class MainWindowViewModel : ViewModelBase
         }
 
         AddRange(created);
+    }
+
+    /// <summary>
+    /// 新建窗口确认后（HF 模型包这类多文件任务）：交给管理器建「父行 + 子任务」；
+    /// 没有引擎（演示 / 单测）时造一行父行占位。
+    /// </summary>
+    public void StartGroup(DownloadGroupRequest group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+
+        if (Actions is { } actions)
+        {
+            actions.StartGroup(group);
+            return;
+        }
+
+        AddRange([new DownloadRecord
+        {
+            Id = Interlocked.Increment(ref _demoId),
+            Url = group.Url,
+            FileName = group.Name,
+            TargetFolder = group.TargetFolder,
+            Status = group.StartImmediately ? DownloadStatus.Queued : DownloadStatus.Paused,
+            IsContainer = true,
+            ChildCount = group.Files.Count,
+        }]);
     }
 
     /// <summary>按当前分类 + 搜索词重建 <see cref="Rows"/>。</summary>

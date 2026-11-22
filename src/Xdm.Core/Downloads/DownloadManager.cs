@@ -14,6 +14,12 @@ public sealed class DownloadManagerOptions
     /// <summary>同时跑几个任务（每任务内部还有自己的段并发）。默认 3，与 UI 设计稿一致。</summary>
     public int MaxConcurrent { get; init; } = 3;
 
+    /// <summary>
+    /// 单个多文件任务（HF 模型包）里同时下载的文件数（1–16，默认 3）。
+    /// 只约束「同一父行下的子任务」，不影响独立任务。
+    /// </summary>
+    public int MaxFilesPerTask { get; init; } = 3;
+
     /// <summary>快照目录；空则用引擎默认（<c>AppContext.BaseDirectory/state</c>）。</summary>
     public string? StateDir { get; init; }
 
@@ -60,10 +66,15 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
     private Func<string?, ProxyRoute>? _resolveProxy;
     private readonly Timer? _persistTimer;
     private int _maxConcurrent;
+    private int _maxFilesPerTask = 3;
     private IReadOnlyDictionary<string, string>? _defaultHeaders;
 
     private long _nextId;
     private int _active;
+
+    /// <summary>父行 id → 当前在跑的子任务数（兄弟闸门用，访问需持 <c>_gate</c>）。</summary>
+    private readonly Dictionary<long, int> _runningChildren = [];
+
     private bool _disposed;
 
     public DownloadManager()
@@ -75,6 +86,7 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
     {
         options ??= new DownloadManagerOptions();
         _maxConcurrent = Math.Max(1, options.MaxConcurrent);
+        _maxFilesPerTask = Math.Clamp(options.MaxFilesPerTask, 1, 16);
         _store = options.Store;
         _resolveProxy = options.ResolveProxy;
 
@@ -144,6 +156,31 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
     }
 
     /// <summary>
+    /// 单个多文件任务（HF 模型包）里同时下载的文件数（1–16）；调大后立即唤醒调度线程放行被挡住的兄弟文件。
+    /// 闸门只作用于「同一父行下的子任务」，独立任务仍受 <see cref="MaxConcurrent"/> 管。
+    /// </summary>
+    public int MaxFilesPerTask
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _maxFilesPerTask;
+            }
+        }
+
+        set
+        {
+            lock (_gate)
+            {
+                _maxFilesPerTask = Math.Clamp(value, 1, 16);
+            }
+
+            _wake.Set();
+        }
+    }
+
+    /// <summary>
     /// 全局默认请求头（如 <c>User-Agent</c>/<c>Referer</c>）。新建任务时与任务级头合并，
     /// 任务级同名头优先。设置变更只影响之后新建的任务。
     /// </summary>
@@ -182,6 +219,79 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
         ObjectDisposedException.ThrowIf(_disposed, this);
+        return AddTask(request, parentId: 0);
+    }
+
+    /// <summary>
+    /// 新建多文件任务（HF 模型包 / torrent）：先建只做汇总的父行，再按
+    /// <see cref="DownloadGroupRequest.Files"/> 各建一条子任务。返回父任务 id。
+    /// </summary>
+    public long EnqueueGroup(DownloadGroupRequest group)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(group.Name);
+        ArgumentException.ThrowIfNullOrWhiteSpace(group.TargetFolder);
+        if (group.Files.Count == 0)
+        {
+            throw new ArgumentException("多文件任务至少要有一个文件", nameof(group));
+        }
+
+        if (!Uri.TryCreate(group.Url, UriKind.Absolute, out var uri)
+            || uri.Scheme is not ("http" or "https"))
+        {
+            throw new ArgumentException($"只支持 http/https 链接：{group.Url}", nameof(group));
+        }
+
+        var initialStatus = group.StartImmediately ? DownloadStatus.Queued : DownloadStatus.Paused;
+        var proxyId = NormalizeProxyId(group.ProxyId);
+        var id = InsertRow(new StoredTask
+        {
+            Url = uri.AbsoluteUri,
+            FileName = group.Name,
+            TargetFolder = group.TargetFolder,
+            TempFolder = group.TargetFolder,
+            MaxSegments = 1,
+            Status = initialStatus,
+            Kind = group.Kind,
+            ProxyId = proxyId,
+            SourceMetaJson = group.SourceMetaJson,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+
+        var task = new DownloadTask(id, uri.AbsoluteUri, group.Name, group.TargetFolder, 1)
+        {
+            Kind = group.Kind,
+            ProxyId = proxyId,
+            Route = _resolveProxy?.Invoke(proxyId) ?? ProxyRoute.System,
+            SourceMetaJson = group.SourceMetaJson,
+        };
+        task.SetStatus(initialStatus);
+
+        var entry = new Entry(task) { Container = true };
+        lock (_gate)
+        {
+            _entries[id] = entry;
+        }
+
+        // 父行先入列（列表里在子行前面），子行随后各自 TaskAdded。
+        TaskAdded?.Invoke(ToRecord(entry));
+
+        foreach (var file in group.Files)
+        {
+            AddTask(file, id);
+        }
+
+        // 子任务齐了再推一次父行：文件数、总大小、汇总状态这时才准。
+        RefreshContainer(id);
+        return id;
+    }
+
+    /// <summary>
+    /// 新建单条任务；<paramref name="parentId"/> 非 0 时挂到父行下（<see cref="EnqueueGroup"/> 用）。
+    /// </summary>
+    private long AddTask(DownloadRequest request, long parentId)
+    {
         if (!Uri.TryCreate(request.Url, UriKind.Absolute, out var uri)
             || uri.Scheme is not ("http" or "https"))
         {
@@ -193,33 +303,27 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         var maxSegments = Math.Clamp(request.MaxSegments, 1, 256);
         var initialStatus = request.StartImmediately ? DownloadStatus.Queued : DownloadStatus.Paused;
         var headers = MergeHeaders(DefaultHeaders, request.Headers);
-        var proxyId = string.IsNullOrWhiteSpace(request.ProxyId) ? null : request.ProxyId.Trim();
+        var proxyId = NormalizeProxyId(request.ProxyId);
         var route = _resolveProxy?.Invoke(proxyId) ?? ProxyRoute.System;
 
-        // 有任务库时 id 由任务库分配（重启后不会复用旧 id）；否则进程内自增。
-        long id;
-        if (_store is { } store)
+        var id = InsertRow(new StoredTask
         {
-            id = store.Insert(new StoredTask
-            {
-                Url = uri.AbsoluteUri,
-                FileName = request.FileName ?? string.Empty,
-                TargetFolder = request.TargetFolder,
-                TempFolder = request.TargetFolder,
-                MaxSegments = maxSegments,
-                Status = initialStatus,
-                Kind = request.Kind,
-                NamePolicy = request.NameConflict,
-                Headers = headers,
-                Cookie = request.Cookie,
-                ProxyId = proxyId,
-                CreatedAt = DateTimeOffset.UtcNow,
-            });
-        }
-        else
-        {
-            id = Interlocked.Increment(ref _nextId);
-        }
+            Url = uri.AbsoluteUri,
+            FileName = request.FileName ?? string.Empty,
+            TargetFolder = request.TargetFolder,
+            TempFolder = request.TargetFolder,
+            MaxSegments = maxSegments,
+            Status = initialStatus,
+            Kind = request.Kind,
+            ParentId = parentId > 0 ? parentId : null,
+            NamePolicy = request.NameConflict,
+            Headers = headers,
+            Cookie = request.Cookie,
+            ProxyId = proxyId,
+            ContentSha256 = request.ContentSha256,
+            SourceMetaJson = request.SourceMetaJson,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
 
         var task = new DownloadTask(
             id,
@@ -229,17 +333,24 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
             maxSegments)
         {
             Kind = request.Kind,
+            ParentId = parentId,
             NamePolicy = request.NameConflict,
             Headers = headers,
             Cookie = request.Cookie,
             ProxyId = proxyId,
             Route = route,
+            ContentSha256 = request.ContentSha256,
+            SourceMetaJson = request.SourceMetaJson,
         };
 
         var entry = new Entry(task);
         lock (_gate)
         {
             _entries[id] = entry;
+            if (parentId > 0 && _entries.TryGetValue(parentId, out var parent))
+            {
+                parent.Children.Add(id);
+            }
         }
 
         if (!request.StartImmediately)
@@ -258,6 +369,13 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         return id;
     }
 
+    /// <summary>有任务库时 id 由任务库分配（重启后不会复用旧 id）；否则进程内自增。</summary>
+    private long InsertRow(StoredTask row)
+        => _store is { } store ? store.Insert(row) : Interlocked.Increment(ref _nextId);
+
+    private static string? NormalizeProxyId(string? proxyId)
+        => string.IsNullOrWhiteSpace(proxyId) ? null : proxyId.Trim();
+
     /// <summary>全部任务快照（id 升序）。</summary>
     public IReadOnlyList<DownloadRecord> Snapshot()
     {
@@ -265,7 +383,7 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         {
             return _entries.Values
                 .OrderBy(static e => e.Task.Id)
-                .Select(ToRecord)
+                .Select(ToRecordLocked)
                 .ToArray();
         }
     }
@@ -275,25 +393,83 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
     {
         lock (_gate)
         {
-            return _entries.TryGetValue(id, out var entry) ? ToRecord(entry) : null;
+            return _entries.TryGetValue(id, out var entry) ? ToRecordLocked(entry) : null;
         }
     }
 
-    /// <summary>该任务的段快照（详情窗口用；未跑过的任务为空）。</summary>
+    /// <summary>
+    /// 该任务的段快照（详情窗口 250ms 轮询用；未跑过的任务为空）。
+    /// <para>
+    /// 段表直接取自任务本身（任务内部有锁），不读 <c>entry.Segments</c> 那份缓存——
+    /// 缓存只在建段/暂停时更新，拿去画时间轴会一直停在旧进度。这里也不持 <c>_gate</c>：
+    /// 轮询不该和调度线程抢锁。
+    /// </para>
+    /// </summary>
     public IReadOnlyList<SegmentSnapshot> Segments(long id)
+    {
+        DownloadTask? task;
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(id, out var entry))
+            {
+                return [];
+            }
+
+            task = entry.Task;
+        }
+
+        var live = task.Snapshot();
+        if (live.Count > 0)
+        {
+            return Array.ConvertAll([.. live], ToSnapshot);
+        }
+
+        lock (_gate)
+        {
+            return _entries.TryGetValue(id, out var fallback) ? fallback.Segments : [];
+        }
+    }
+
+    /// <summary>父行下的子任务快照（id 升序，详情窗口用）；非父行返回空。</summary>
+    public IReadOnlyList<DownloadRecord> Children(long id)
     {
         lock (_gate)
         {
-            return _entries.TryGetValue(id, out var entry) ? entry.Segments : [];
+            if (!_entries.TryGetValue(id, out var parent) || parent.Children.Count == 0)
+            {
+                return [];
+            }
+
+            var records = new List<DownloadRecord>(parent.Children.Count);
+            foreach (var childId in parent.Children)
+            {
+                if (_entries.TryGetValue(childId, out var child))
+                {
+                    records.Add(ToRecordLocked(child));
+                }
+            }
+
+            return records;
         }
     }
 
-    /// <summary>暂停：排队中的直接置暂停；跑着的交给引擎（保存快照后关句柄）。</summary>
+    /// <summary>暂停：排队中的直接置暂停；跑着的交给引擎（保存快照后关句柄）。父行则逐个暂停子任务。</summary>
     public bool Pause(long id)
     {
         if (!TryGetEntry(id, out var entry))
         {
             return false;
+        }
+
+        if (entry.Container)
+        {
+            // 父行自身不在队列里，暂停就是停掉所有子任务；父行状态由汇总重算。
+            foreach (var childId in ChildIds(entry))
+            {
+                Pause(childId);
+            }
+
+            return true;
         }
 
         if (_queue.Remove(id))
@@ -327,12 +503,22 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         return true;
     }
 
-    /// <summary>恢复：失败/暂停的任务回到队列，等闸门放行。</summary>
+    /// <summary>恢复：失败/暂停的任务回到队列，等闸门放行。父行则逐个恢复子任务。</summary>
     public bool Resume(long id)
     {
         if (!TryGetEntry(id, out var entry))
         {
             return false;
+        }
+
+        if (entry.Container)
+        {
+            foreach (var childId in ChildIds(entry))
+            {
+                Resume(childId);
+            }
+
+            return true;
         }
 
         var status = entry.Task.Status;
@@ -377,12 +563,21 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
     public bool Delete(long id, bool deleteFile = false)
     {
         Entry? entry;
+        long[] children;
         lock (_gate)
         {
             if (!_entries.Remove(id, out entry))
             {
                 return false;
             }
+
+            children = entry.Container ? [.. entry.Children] : [];
+        }
+
+        // 先删子任务（各自删 part / 已发布文件），再把父行收掉，避免留下孤儿行。
+        foreach (var childId in children)
+        {
+            Delete(childId, deleteFile);
         }
 
         _queue.Remove(id);
@@ -603,7 +798,9 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                 return false;
             }
 
-            while (_queue.TryDequeue(out var candidate))
+            // 只扫一遍当前队列长度：被兄弟闸门挡住的候选会放回队尾，不设上限就会空转。
+            var budget = _queue.Count;
+            while (budget-- > 0 && _queue.TryDequeue(out var candidate))
             {
                 if (!_entries.TryGetValue(candidate, out var entry))
                 {
@@ -614,6 +811,20 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                 {
                     // 排队期间被暂停/删除
                     continue;
+                }
+
+                var parentId = entry.Task.ParentId;
+                if (parentId > 0)
+                {
+                    _runningChildren.TryGetValue(parentId, out var running);
+                    if (running >= _maxFilesPerTask)
+                    {
+                        // 同一个包里的文件已经占满名额：放回队尾，等有兄弟结束（ReleaseSlot 会唤醒调度）。
+                        _queue.Enqueue(candidate);
+                        continue;
+                    }
+
+                    _runningChildren[parentId] = running + 1;
                 }
 
                 entry.SlotHeld = true;
@@ -700,6 +911,20 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
 
             entry.SlotHeld = false;
             _active--;
+
+            // 还掉兄弟名额：父行的下一个文件这才能被放行。
+            var parentId = entry.Task.ParentId;
+            if (parentId > 0 && _runningChildren.TryGetValue(parentId, out var running))
+            {
+                if (running <= 1)
+                {
+                    _runningChildren.Remove(parentId);
+                }
+                else
+                {
+                    _runningChildren[parentId] = running - 1;
+                }
+            }
         }
 
         _wake.Set();
@@ -735,23 +960,14 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         try
         {
             store.ResetIncomplete();
-            foreach (var row in store.LoadAll())
+            var rows = store.LoadAll();
+
+            foreach (var row in rows)
             {
                 var status = row.Status;
-                string? errorText = row.Error is { } storedError && storedError != DownloadError.None
+                var errorText = row.Error is { } storedError && storedError != DownloadError.None
                     ? DownloadErrorText.Describe(storedError)
                     : null;
-
-                if (status == DownloadStatus.Completed)
-                {
-                    var published = Path.Combine(row.TargetFolder, row.FileName);
-                    if (!File.Exists(published))
-                    {
-                        status = DownloadStatus.Failed;
-                        errorText = "已完成的文件不存在";
-                        store.UpdateStatus(row.Id, status, DownloadError.None, null);
-                    }
-                }
 
                 var task = new DownloadTask(
                     row.Id,
@@ -765,6 +981,8 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                     NamePolicy = row.NamePolicy,
                     Headers = row.Headers,
                     Cookie = row.Cookie,
+                    ContentSha256 = row.ContentSha256,
+                    SourceMetaJson = row.SourceMetaJson,
                     ProxyId = row.ProxyId,
 
                     // 重启后按当时的代理表重新解析：代理被删/改地址都跟着最新设置走。
@@ -790,6 +1008,47 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
                     Segments = task.Snapshot().Select(ToSnapshot).ToArray(),
                 };
             }
+
+            // 父子关系：有子行的才是父行（首版 HF 是每个文件一条、没有子行，按普通任务显示）。
+            foreach (var row in rows)
+            {
+                if (row.ParentId is not { } parentId || !_entries.TryGetValue(parentId, out var parent))
+                {
+                    continue;
+                }
+
+                parent.Container = true;
+                parent.Children.Add(row.Id);
+            }
+
+            foreach (var row in rows)
+            {
+                if (!_entries.TryGetValue(row.Id, out var entry))
+                {
+                    continue;
+                }
+
+                if (entry.Container)
+                {
+                    // 父行没有自己的一致性可查：状态/错误/完成时间全部按子任务重算。
+                    var totals = AggregateLocked(entry);
+                    entry.Task.SetStatus(totals.Status);
+                    entry.ErrorText = totals.Error;
+                    entry.CompletedAt = totals.CompletedAt;
+                    continue;
+                }
+
+                if (row.Status == DownloadStatus.Completed)
+                {
+                    var published = Path.Combine(row.TargetFolder, row.FileName);
+                    if (!File.Exists(published))
+                    {
+                        entry.Task.SetStatus(DownloadStatus.Failed);
+                        entry.ErrorText = "已完成的文件不存在";
+                        store.UpdateStatus(row.Id, DownloadStatus.Failed, DownloadError.None, null);
+                    }
+                }
+            }
         }
         catch (Exception ex) when (ex is SqlException or IOException or UnauthorizedAccessException)
         {
@@ -814,6 +1073,27 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
 
         foreach (var entry in entries)
         {
+            if (entry.Container)
+            {
+                // 父行没有段可写，只需把汇总进度落到库里（重启后进度条不倒退）。
+                GroupTotals totals;
+                lock (_gate)
+                {
+                    totals = AggregateLocked(entry);
+                }
+
+                if (totals.Count == 0)
+                {
+                    continue;
+                }
+
+                var id = entry.Task.Id;
+                var synced = totals.Synced;
+                var size = totals.Size;
+                TryStore(store => store.UpdateProgress(id, synced, size));
+                continue;
+            }
+
             if (entry.Task.Status is not (DownloadStatus.Connecting or DownloadStatus.Downloading))
             {
                 continue;
@@ -975,14 +1255,48 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
 
     private DownloadRecord ToRecord(Entry entry)
     {
+        lock (_gate)
+        {
+            return ToRecordLocked(entry);
+        }
+    }
+
+    /// <summary>调用方需持有 <see cref="_gate"/>（父行汇总要读子任务）。</summary>
+    private DownloadRecord ToRecordLocked(Entry entry)
+    {
         var task = entry.Task;
-        var segments = task.Snapshot();
         var name = task.FileName;
         if (string.IsNullOrWhiteSpace(name))
         {
             name = DerivedName(task.Url);
         }
 
+        if (entry.Container)
+        {
+            // 父行自身没有段：大小/进度/速度/状态全按子任务汇总，段数位让给「文件数」。
+            var totals = AggregateLocked(entry);
+            return new DownloadRecord
+            {
+                Id = task.Id,
+                FileName = name,
+                Url = task.Url,
+                TargetFolder = task.TargetFolder,
+                SizeBytes = totals.Size,
+                SyncedBytes = totals.Synced,
+                SpeedBps = totals.Speed,
+                RemainingSeconds = totals.Speed > 0 && totals.Size > totals.Synced
+                    ? (int)Math.Ceiling((totals.Size - totals.Synced) / totals.Speed)
+                    : null,
+                Status = totals.Status,
+                ErrorText = totals.Error,
+                IsContainer = true,
+                ChildCount = totals.Count,
+                CompletedChildren = totals.Done,
+                CompletedAt = totals.CompletedAt,
+            };
+        }
+
+        var segments = task.Snapshot();
         return new DownloadRecord
         {
             Id = task.Id,
@@ -997,8 +1311,154 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
             ErrorText = entry.ErrorText,
             SegmentCount = segments.Count,
             CompletedSegments = segments.Count(static s => s.Status == SegmentStatus.Finished),
+            ParentId = task.ParentId > 0 ? task.ParentId : null,
             CompletedAt = entry.CompletedAt,
         };
+    }
+
+    /// <summary>父行汇总结果（只用于生成 <see cref="DownloadRecord"/>，不回写子任务）。</summary>
+    private readonly record struct GroupTotals(
+        long Size,
+        long Synced,
+        double Speed,
+        int Count,
+        int Done,
+        DownloadStatus Status,
+        string? Error,
+        DateTimeOffset? CompletedAt);
+
+    /// <summary>按子任务汇总父行；调用方需持有 <see cref="_gate"/>。</summary>
+    private GroupTotals AggregateLocked(Entry parent)
+    {
+        long size = 0;
+        long synced = 0;
+        double speed = 0;
+        int done = 0;
+        int failed = 0;
+        int diskError = 0;
+        int active = 0;
+        int queued = 0;
+        string? error = null;
+        DateTimeOffset? completedAt = null;
+
+        foreach (var childId in parent.Children)
+        {
+            if (!_entries.TryGetValue(childId, out var child))
+            {
+                continue;
+            }
+
+            var task = child.Task;
+            size += task.TotalSize ?? 0;
+            synced += task.SyncedTotal;
+            speed += child.SpeedBps;
+
+            switch (task.Status)
+            {
+                case DownloadStatus.Completed:
+                    done++;
+                    if (child.CompletedAt is { } at && (completedAt is null || at > completedAt))
+                    {
+                        completedAt = at;
+                    }
+
+                    break;
+                case DownloadStatus.Failed:
+                    failed++;
+                    error ??= child.ErrorText ?? "下载失败";
+                    break;
+                case DownloadStatus.DiskError:
+                    diskError++;
+                    error ??= child.ErrorText ?? "磁盘错误";
+                    break;
+                case DownloadStatus.Queued:
+                    queued++;
+                    break;
+                case DownloadStatus.Paused:
+                    break;
+                default:
+                    active++;
+                    break;
+            }
+        }
+
+        var count = parent.Children.Count;
+        DownloadStatus status;
+        if (count == 0)
+        {
+            status = parent.Task.Status;
+        }
+        else if (done == count)
+        {
+            status = DownloadStatus.Completed;
+        }
+        else if (active > 0)
+        {
+            // 有文件在跑就显示下载中，别因为个别失败把整包说成失败。
+            status = DownloadStatus.Downloading;
+        }
+        else if (diskError > 0 || failed > 0)
+        {
+            status = diskError > 0 ? DownloadStatus.DiskError : DownloadStatus.Failed;
+            error ??= "部分文件下载失败";
+        }
+        else if (queued > 0)
+        {
+            status = DownloadStatus.Queued;
+        }
+        else
+        {
+            status = DownloadStatus.Paused;
+        }
+
+        return new GroupTotals(
+            size,
+            synced,
+            speed,
+            count,
+            done,
+            status,
+            status is DownloadStatus.Failed or DownloadStatus.DiskError ? error : null,
+            status == DownloadStatus.Completed ? completedAt ?? parent.CompletedAt : null);
+    }
+
+    /// <summary>父行下子任务 id 的快照（避免持锁遍历时被别人改）。</summary>
+    private IReadOnlyList<long> ChildIds(Entry parent)
+    {
+        lock (_gate)
+        {
+            return [.. parent.Children];
+        }
+    }
+
+    /// <summary>
+    /// 子任务变化后重算父行并推送。状态真的变了才落库（进度由 30s 的 <see cref="PersistTick"/> 统一写），
+    /// 否则 12 个文件的进度事件会把任务库刷爆。
+    /// </summary>
+    private void RefreshContainer(long parentId)
+    {
+        DownloadRecord record;
+        bool statusChanged;
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(parentId, out var parent) || !parent.Container)
+            {
+                return;
+            }
+
+            var totals = AggregateLocked(parent);
+            statusChanged = parent.Task.SetStatus(totals.Status);
+            parent.ErrorText = totals.Error;
+            parent.CompletedAt = totals.CompletedAt;
+            record = ToRecordLocked(parent);
+        }
+
+        if (statusChanged)
+        {
+            TryStore(store => store.UpdateStatus(parentId, record.Status, null, record.CompletedAt));
+        }
+
+        TaskUpdated?.Invoke(record);
     }
 
     private static string DerivedName(string url)
@@ -1009,14 +1469,30 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
     private void Publish(long id)
     {
         DownloadRecord? record;
+        long parentId;
         lock (_gate)
         {
-            record = _entries.TryGetValue(id, out var entry) ? ToRecord(entry) : null;
+            if (_entries.TryGetValue(id, out var entry))
+            {
+                record = ToRecordLocked(entry);
+                parentId = entry.Task.ParentId;
+            }
+            else
+            {
+                record = null;
+                parentId = 0;
+            }
         }
 
         if (record is not null)
         {
             TaskUpdated?.Invoke(record);
+        }
+
+        // 子任务变了父行就得跟着变（状态/总进度/完成时间）。
+        if (parentId > 0)
+        {
+            RefreshContainer(parentId);
         }
     }
 
@@ -1056,5 +1532,11 @@ public sealed class DownloadManager : IDownloadObserver, IDisposable
         public bool PauseRequested { get; set; }
 
         public IReadOnlyList<SegmentSnapshot> Segments { get; set; } = [];
+
+        /// <summary>父行：自身不下载，状态/进度/速度按 <see cref="Children"/> 汇总。</summary>
+        public bool Container { get; set; }
+
+        /// <summary>父行下的子任务 id（按创建顺序）；非父行为空。访问需持 <c>_gate</c>。</summary>
+        public List<long> Children { get; } = [];
     }
 }

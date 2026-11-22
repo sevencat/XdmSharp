@@ -24,6 +24,7 @@ public sealed class MainWindow : Window
 
     // 右键菜单项只能挂 Command（没有 OnClick），这几个是行级语义命令，处理器在 ctor 里注册。
     private static readonly Command RowTogglePauseCommand = new("xdm.row.togglePause", "暂停 / 继续");
+    private static readonly Command RowDetailsCommand = new("xdm.row.details", "任务详情…");
     private static readonly Command RowOpenFolderCommand = new("xdm.row.openFolder", "打开所在文件夹");
     private static readonly Command RowCopyUrlCommand = new("xdm.row.copyUrl", "复制下载链接");
     private static readonly Command RowDeleteCommand = new("xdm.row.delete", "删除任务");
@@ -409,13 +410,29 @@ public sealed class MainWindow : Window
     /// <param name="initialUrl">预填的链接；空则等同普通新建。</param>
     public void BeginNewDownload(string? initialUrl = null)
     {
-        var requests = NewDownloadDialog.Show(
+        var result = NewDownloadDialog.Show(
             this,
             initialUrl,
             _vm.DefaultSaveFolder,
             _vm.DefaultSegments,
-            _vm.ProxyChoices);
-        if (requests is { Count: > 0 })
+            _vm.ProxyChoices,
+            _settings.HuggingFaceEndpoint,
+            _settings.HuggingFaceToken,
+            hfProxy: ProxyResolver.Resolve(_settings, null),
+            hfProxyResolver: proxyId => ProxyResolver.Resolve(_settings, proxyId));
+        if (result is null)
+        {
+            return;
+        }
+
+        if (result.Group is { } group)
+        {
+            _vm.StartGroup(group);
+            ShowNotice($"已新建 {group.Name}（{group.Files.Count} 个文件）");
+            return;
+        }
+
+        if (result.Requests is { Count: > 0 } requests)
         {
             _vm.StartDownloads(requests);
             ShowNotice($"已新建 {requests.Count} 个任务");
@@ -423,6 +440,9 @@ public sealed class MainWindow : Window
     }
 
     private void OnNewDownload() => BeginNewDownload();
+
+    /// <summary>弹出任务详情（分段时间轴 / 多文件子任务列表）。</summary>
+    private void ShowDetails(DownloadRowViewModel row) => TaskDetailsDialog.Show(this, row, _vm.Actions);
 
     private void ShowNotice(string text) => Title = $"XDM Sharp — {text}";
 
@@ -538,6 +558,7 @@ public sealed class MainWindow : Window
         // 必须显式把命令目标指到窗口（否则点菜单项什么都不会发生）。
         var menu = new ContextMenu().Items(
             new MenuItem("暂停 / 继续", RowTogglePauseCommand),
+            new MenuItem("任务详情…", RowDetailsCommand),
             new MenuItem("打开所在文件夹", RowOpenFolderCommand),
             new MenuItem("复制下载链接", RowCopyUrlCommand),
             new MenuItem("删除任务", RowDeleteCommand));
@@ -690,6 +711,15 @@ public sealed class MainWindow : Window
             {
                 _vm.SelectedRow = row;
                 _taskList.SelectedItem = row;
+            }
+        };
+
+        // 双击 = 任务详情（分段时间轴）；行本身不是按钮，只能在这里接。
+        root.MouseDoubleClick += e =>
+        {
+            if (e.Button == MouseButton.Left && root.Tag is RowBinding b && b.Item is { } row)
+            {
+                ShowDetails(row);
             }
         };
 
@@ -854,6 +884,16 @@ public sealed class MainWindow : Window
                 if (_vm.SelectedRow is { } row)
                 {
                     _vm.TogglePause(row);
+                }
+            },
+            () => _vm.SelectedRow is not null);
+
+        Commands.Register(RowDetailsCommand,
+            () =>
+            {
+                if (_vm.SelectedRow is { } row)
+                {
+                    ShowDetails(row);
                 }
             },
             () => _vm.SelectedRow is not null);

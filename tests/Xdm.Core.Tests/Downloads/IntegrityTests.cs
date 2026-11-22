@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using Xdm.Core.Downloads;
+using Xdm.Core.Errors;
 using Xdm.Core.Storage;
 using Xdm.Core.Tests.Fakes;
 
@@ -49,6 +50,46 @@ public class IntegrityTests
         Assert.True(result.Success);
         Assert.True(SegmentVerifier.VerifyFile(result.FinalPath!, null));
         Assert.False(SegmentVerifier.VerifyFile(result.FinalPath!, new string('0', 64)));
+    }
+
+    [Fact]
+    public void Publish_VerifiesExpectedHash_BeforeMovingToTarget()
+    {
+        using var harness = new EngineHarness();
+        var bytes = EngineHarness.MakeBytes(300 * 1024, seed: 9);
+        harness.Server.AddFile("/verified.bin", bytes);
+
+        var task = harness.CreateTask(
+            "/verified.bin",
+            fileName: "verified.bin",
+            sha256: SegmentVerifier.ComputeSha256(bytes));
+        harness.Engine.Start(task);
+        var result = harness.WaitForResult(task);
+
+        Assert.True(result.Success);
+        Assert.True(File.Exists(result.FinalPath));
+        Assert.Equal(SHA256.HashData(bytes), SHA256.HashData(File.ReadAllBytes(result.FinalPath!)));
+    }
+
+    [Fact]
+    public void Publish_FailsWithChecksum_AndDropsPart_WhenHashDiffers()
+    {
+        using var harness = new EngineHarness();
+        var bytes = EngineHarness.MakeBytes(200 * 1024, seed: 11);
+        harness.Server.AddFile("/corrupt.bin", bytes);
+
+        var task = harness.CreateTask("/corrupt.bin", fileName: "corrupt.bin", sha256: new string('0', 64));
+        harness.Engine.Start(task);
+        var result = harness.WaitForResult(task);
+
+        Assert.False(result.Success);
+        Assert.Equal(DownloadError.Checksum, result.Error);
+
+        // 坏内容不能发布，也不能留着让下一次续传接着用。
+        Assert.False(File.Exists(Path.Combine(harness.TargetFolder, "corrupt.bin")));
+        Assert.False(File.Exists(task.PartPath));
+        Assert.Contains(harness.Observer.Failed, f => f.Error == DownloadError.Checksum);
+        Assert.Empty(harness.Observer.Completed);
     }
 
     [Fact]

@@ -39,4 +39,10 @@ public sealed record DownloadRequest
     /// 建任务时解析成具体路线，之后改设置不影响这个任务。
     /// </summary>
     public string? ProxyId { get; init; }
+
+    /// <summary>期望内容 sha256（HF 的 LFS oid）；非空时发布前校验，不符则删 part 并报 <see cref="Xdm.Core.Errors.DownloadError.Checksum"/>。</summary>
+    public string? ContentSha256 { get; init; }
+
+    /// <summary>来源元数据 JSON（HF: endpoint/repo/revision/path），随任务持久化。</summary>
+    public string? SourceMetaJson { get; init; }
 }

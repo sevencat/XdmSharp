@@ -155,6 +155,12 @@ public sealed class DownloadTask
     /// </summary>
     public Http.ProxyRoute Route { get; init; } = Http.ProxyRoute.System;
 
+    /// <summary>期望内容 sha256（HF 的 LFS oid / 服务端 Digest）；非空时发布前校验。</summary>
+    public string? ContentSha256 { get; init; }
+
+    /// <summary>来源元数据 JSON（HF: endpoint/repo/revision/path），随任务持久化。</summary>
+    public string? SourceMetaJson { get; init; }
+
     /// <summary>未完成文件（<c>.&lt;id&gt;.xdm-part</c>，点前缀避免被误认为完整文件）。</summary>
     public string PartPath => Path.Combine(TargetFolder, $".{Id}.xdm-part");
 

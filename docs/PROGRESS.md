@@ -11,7 +11,8 @@
 | M3 | 引擎核心（单段 → 多段 → 续传） | 完成（等分切段；动态二分/接管/竞速转入 M6） | 2026-11-22 |
 | M4 | 接线（Manager + 进度上屏） | 完成（进度详情窗口待做） | 2026-11-22 |
 | M5 | 任务库与队列（PureDb） | 完成（并发压测待补） | 2026-11-22 |
-| M6 | 打磨（限速/代理/通知/单实例） | 进行中（限速/代理/设置/标题栏/单实例/命令行 URL 已完成，Avalonia 前端已删除；托盘+完成通知/进度详情窗口/PartAllocation 待做） | — |
+| M6 | 打磨（限速/代理/通知/单实例） | 进行中（限速/代理/设置/标题栏/单实例/命令行 URL/全局连接上限/进度详情窗口/文件级并发已完成，Avalonia 前端已删除；托盘+完成通知/PartAllocation 待做） | — |
+| V2 | HuggingFace 模型下载 | 进行中（清单 + 勾选 + 父任务汇总 + 代理 + 发布前 sha256 校验已落地；子行展开、文件级并发待做） | 2026-11-23 |
 
 状态取值：`未开始` / `进行中` / `完成` / `阻塞`（阻塞须在日志里写明原因）。
 
@@ -25,12 +26,132 @@
 | 4 | 渲染栈 | **MewUI（`Win32Platform` + `Direct2DBackend`）唯一**；Avalonia 前端已于 2026-11-22 删除 | 2026-11-22 |
 | 5 | V3 BT 引擎：引 `MonoTorrent`（MIT）还是自研最小实现 | 待 V3 立项时评估；优先引库，自研仅作兜底 | — |
 | 6 | V2 HF 是否需要 `hf_transfer` 式多连接加速 | 待 V2 实测 CDN 单连接吞吐后定 | — |
-| 7 | 父子任务的列表呈现（展开 / 独立窗口 / 折叠统计） | 首期只做单行，但行模板预留子行区 | — |
+| 7 | 父子任务的列表呈现（展开 / 独立窗口 / 折叠统计） | 列表只渲染父行（第二行显示「N/M 个文件」），子行不占行；展开视图后续再补，行模板的子行区保留 | 2026-11-23 |
 | 8 | 任务库位置与文件名 | **`AppContext.BaseDirectory\xdm.db`**（exe 同目录，绿色版）；不可写回退 `%LOCALAPPDATA%\Xdm\`；命令行 `--db <path>` 覆盖（优先级最高） | 2026-11-22 |
 | 9 | 发布形态：framework-dependent 目录（4MB）/ self-contained / NativeAOT（15MB） | 默认 framework-dependent（需 .NET 10）；另提供 AOT 档 `build.ps1 -Aot`（15MB 单 exe、目标机零依赖；构包需 MSVC 链接器 + Windows SDK） | 2026-11-22 |
 | 10 | 同时下载/恢复的任务量大时，界面怎么刷 | **待更新项进队列 → `DispatcherTimer` 每 200ms 在 UI 线程批量 flush**；同时把行定位改字典索引、每帧汇总只算一次、结构变化合并（方案见 `ARCHITECTURE.md` §6.1）。当前是 250ms 单条 drain，够用到百级任务 | 2026-11-22（方案定，未实现） |
 
 ## 日志
+
+### 2026-11-23 · 多文件任务的文件级并发闸门
+
+- **问题**：`EnqueueGroup` 一次性把 HF 包里**所有**文件塞进队列，`MaxConcurrent` 只能保证「同时跑 3 个任务」，
+  于是一个 300 文件的模型包会把任务槽位占满几十分钟，用户手动添加的小任务排在后面饿死；
+  同时任务列表里 297 行 `Queued` 也毫无信息量。
+- **做法**：`DownloadManager` 加兄弟闸门 —— `_runningChildren`（父行 id → 在跑子任务数）在 `_gate` 内随
+  `SlotHeld` 加减；`TryTakeNext` 遇到「本包名额已满」的子任务就**放回队尾**并继续扫下一个，
+  单次只扫一遍当前队列长度（`budget`），不会被全是被挡兄弟的队列卡成死循环；`ReleaseSlot` 还名额后
+  `_wake.Set()` 唤醒调度线程重扫。独立任务（`ParentId == 0`）不受影响，仍只受 `MaxConcurrent` 管。
+- **配置**：`AppSettings.MaxFilesPerTask`（默认 3，夹紧 1–16，schema 4 → 5）、`DownloadManagerOptions.MaxFilesPerTask`、
+  `DownloadManager.MaxFilesPerTask`（运行中可调，调大立即唤醒）；设置页「连接」页新增
+  「每个多文件任务同时下载的文件数」，保存后即时生效。
+- **测试**：`DownloadGroupTests` 加 3 例 —— `MaxFilesPerTask_One_SerializesSiblingFiles`（4 文件、闸门 1，
+  采样子任务并发峰值必须是 1 且全部完成）、`MaxFilesPerTask_Two_RunsSiblingFilesInPairs`（5 文件、闸门 2，峰值恰好 2）、
+  `MaxFilesPerTask_DoesNotThrottleIndependentTasks`（两个无父行的任务能同时跑，证明闸门没误伤）；
+  `AppSettingsTests` 加 2 例（默认 3 + 夹紧、`Clone` 拷贝），`ProxySettingsViewModelTests` 加 1 例（回填 + 保存夹紧）。
+- **测试结果**：全量 **321 条全绿**（Core 235 + Ui.Mew 86），`DownloadGroupTests` 连跑 6 轮无抖动，构建 0 warning。
+- **文档**：`ARCHITECTURE.md` §6.2 新增「同一包内的文件闸门」表、§12.2 第 6 条改为指向实现。
+- **仍未做**：列表里的子行展开视图、`hf_transfer` 式单文件多连接。
+
+### 2026-11-23 · 任务详情窗口（分段时间轴）
+
+- **新窗口** `src/Xdm.Ui.Mew/Dialogs/TaskDetailsDialog.cs`：自绘标题栏 + 头部（文件名 / URL / 状态徽标 / 大小 /
+  速度 / 剩余 / 总进度条 + 百分比 / 「N/M 段 · 目录」）+ 分段列表。普通任务逐段显示 `#id / 区间 / 已同步÷段长 /
+  状态`，多文件任务（HF 模型包）逐文件显示 `序号 / 文件名 / 已下载÷总长 / 状态`。
+- **数据是拉的不是推的**：窗口每 250ms 调一次 `IDownloadActions.Segments(id)` / `Children(id)`（主列表同一节拍），
+  窗口不开就没有任何开销，也不用往 `IDownloadObserver` 里加「只有窗口开着才有人听」的事件。
+- **`DownloadManager.Segments` 改读实时段表**：原来返回 `entry.Segments` 缓存，只在建段/暂停时更新，
+  拿去画时间轴会一直停在旧进度。现在从 `task.Snapshot()`（任务内锁）取，且不持 `_gate`——4Hz 轮询不该和调度线程抢锁；
+  段表为空时回落到缓存（未跑过的任务）。新增 `DownloadManager.Children(id)` 返回父行下的子任务记录（id 升序）。
+- **`IDownloadActions` 增两员**：`Segments(long)`、`Children(long)`；`MewDownloadActions` 直转管理器。
+- **接入口**：右键菜单新增「任务详情…」（`RowDetailsCommand`），行上 `MouseDoubleClick` 也打开。
+  行控件只在段/文件集合变化时重建，仅进度走动时复用已有控件。
+- **测试**：`TaskDetailsDialogTests`(5：逐段渲染、集合不变复用 / 变化重建、空段提示、父行渲染子文件、失败文案)；
+  Core 补 `DownloadGroupTests.Children_ExposesChildRecords_InIdOrder`、`Segments_IsLive_WhileTaskRuns`（钉住「缓存不刷新」这个坑）。
+  全量 **315 条全绿**（Core 230 + Ui.Mew 85），构建 0 warning。
+- **稳定性观测**：串行连跑 8 轮全解决方案 + 12 轮 Core 全绿；此前在同一进程里叠跑构建/多份测试进程的高负载下见过 2 次计时类用例失败
+  （`PeriodicSync_WritesProgressBeforeShutdown`、`Delete_RemovesPartAndState`，均为「等到有进度再暂停」的写法），
+  之后 26 轮串行未复现，判为资源竞争所致的测试抖动，本轮不改；若以后进 CI 再统一上「重试 + 放宽等待」策略。
+- **文档**：`UI-DESIGN.md` 窗口表 / §7 交互表、`IDownloadObserver.OnSegmentsChanged` 注释（明确详情窗口不订阅）。
+
+### 2026-11-23 · 全局连接上限（ConnectionSlots）+ 暂停竞态收口
+
+- **配额**：新增 `Core/Scheduling/ConnectionSlots`（信号量式，`Acquire`/`Release`/`SetCapacity`/`IsSaturated`
+  + `SlotLease` 作用域租约）。`DownloadEngineOptions.ConnectionSlots` 由 `MewRuntime` 建一个实例给所有任务共享；
+  `SegmentRunner.Run` 的「发请求 → 读完响应体」整段持租约，**探测请求同样占名额**（否则并发峰值会超上限）。
+- **设置**：`AppSettings.MaxConnections`（默认 32，夹紧 1–256，schema 3 → 4），`SettingsViewModel` +
+  设置对话框「连接」页新增「全局连接上限（所有任务的所有分段合计）」；保存后 `SetCapacity` 即时生效，
+  调大立刻唤醒等待中的段。
+- **测试**：新增 `ConnectionSlotsTests`(10：饱和阻塞/Release 唤醒/等待中取消/调大唤醒/调小不打断在途/
+  Dispose 踢出等待者/超额 Release/夹紧/null 空转/租约归还)、`ConnectionQuotaTests`(4：占满且不超、
+  容量 1 串行、跨任务共享、暂停归还名额)。断言口径改成采样 `ConnectionSlots.InFlight` 峰值——
+  服务端「写完关 socket」比客户端「读完让名额」慢半拍，服务端连接峰值不可靠。
+- **修掉两个暂停竞态**（并行跑测试放大后暴露）：
+  1. `Pause` 枚举 `Runtime.Threads` 时与 `Launch` 追加线程并发 → `Collection was modified`；
+     且 `Resume` 在调度线程上尚未 `Launch` 就被 `Pause` 收尾，段线程会拿到已释放的 CTS。
+     改为 `Runtime.SetupDone`（装配结束置位）+ 线程表读写持 `Runtime.Gate`，`Pause` 先 `Cancel` 再等装配收尾。
+  2. 后台线程取 `Cancellation.Token` / `WaitHandle` 撞上 CTS 已释放 → 未捕获 `ObjectDisposedException`。
+     改为构造时抓 `Runtime.Token`，`WaitHandle` 等待对 `ObjectDisposedException` 按「已收尾」处理
+     （引擎 `Sleep` / `SegmentRunner.Wait`），`Pause`/`Dispose` 的 `Cancel` 走 `TryCancel` 容忍已释放。
+- **测试结果**：Core 连跑 4 轮均 **228 条全绿**；全量 **308 条全绿**（Core 228 + Ui.Mew 80），构建 0 warning。
+- **未做**：文件级并发限流（HF 一个任务内最多几个文件同时跑）、`hf_transfer` 式单文件多连接。
+
+### 2026-11-23 · HF 父任务汇总（契约 1/2 落地）
+
+- **Core**：新增 `DownloadGroupRequest`（父行名/目录/协议/元数据 + 子任务请求列表）；
+  `DownloadManager.EnqueueGroup` 插父行 + 逐文件 `AddTask(file, parentId)`，父行不进调度队列。
+- **汇总**：新增 `GroupTotals` / `AggregateLocked`，父行的大小/已下载/速度/文件数由子任务求和，
+  状态按「全完成 → 有子在跑 → 有失败 → 有排队 → 暂停」推导；`Publish(child)` 末尾联动
+  `RefreshContainer`（状态变了才落库，进度走 30s 的 `PersistTick`）。
+- **级联**：`Pause`/`Resume`/`Delete` 对父行逐个作用到子任务；删父行先删子行，不留孤儿。
+- **恢复**：按 `parent_id` 重建父子关系（**有子行才算父行**），父行不做「已完成文件是否存在」检查，
+  状态与完成时间按子任务重算；首版按文件建的旧任务没有子行，照旧按普通任务显示，无需迁移。
+- **UI**：`MainWindowViewModel.AddRange` 跳过子行（列表只出父行），`StartGroup` 走 `IDownloadActions.StartGroup`
+  → `MewDownloadActions` → `EnqueueGroup`；行第二行由「N/M 段」改为「N/M 个文件」，图标标签「包」；
+  完成通知只按父行报一次（`MewDownloadBridge` 过滤 `ParentId != null`）。
+- **弹窗**：`NewDownloadDialog.Show` 改为返回 `NewDownloadResult`（链接页给 `Requests`，HF 页给 `Group`）。
+- **测试**：新增 `DownloadGroupTests`(6：汇总/下载中联动/暂停恢复/删除级联/子失败汇总/重启恢复)、
+  `DownloadGroupRowTests`(4：子行不占行/文件数文案/完成文案/StartGroup)。全量 **294 条全绿**
+  （Core 214 + Ui.Mew 80），构建 0 warning。
+- **未做**：列表里的子行展开视图（当前只渲染父行）、文件级并发限流、`hf_transfer` 式多连接。
+
+### 2026-11-23 · HuggingFace 下载（第一版：模型 id → 清单 → 勾选 → 任务）
+
+- **Core（纯逻辑，可注入 HttpClient）**，新命名空间 `Xdm.Core.HuggingFace`：
+  - `HfRepo`：解析 `owner/name`（含粘贴整条 `https://huggingface.co/owner/name` 的容错），
+    `ResolveUrl` 拼 `{endpoint}/{repo}/resolve/{rev}/{path}?download=true`。
+  - `HfFile`：清单条目 `path`/`size`/`sha256`，`RelativeFolder`、`IsSafePath`
+    （拒 `..`、绝对路径、`//`、反斜杠——清单里出现过 WSL 风格的路径）。
+  - `HfHubClient`：`/api/models/{repo}/tree/{rev}?recursive=true&expand=true`，`Link` 头分页（50 页兜底），
+    过滤目录/符号链接，按路径排序；`CreateHandler` 开自动重定向 + `DecompressionMethods.All`
+    （gzip JSON 不解压就解析不了），与下载客户端的「关重定向、关自动解压」刻意相反。
+  - `HfDownloadPlanner`：`RootFolder` = `{保存目录}/{owner}/{name}`；`Plan` 按 `size` 跳过本地已存在文件；
+    `ToRequests` 先建子目录，再出 `TaskKind.HuggingFace` 请求（token → `Authorization`、sha256 → `ContentSha256`、
+    协议信息 → `SourceMetaJson`）。
+- **重名策略改成 `Overwrite`**：模型目录是仓库镜像，大小变了就是文件更新；默认 `Rename` 会写成
+  `model (1).onnx`，推理框架按原名加载就读不到。大小一致的文件在 `Plan` 已跳过，覆盖是安全的。
+- **设置项**：新增 `HuggingFaceEndpoint`（默认 `https://huggingface.co`，镜像可填 `hf-mirror.com`）与
+  `HuggingFaceToken`，保存时走 `SanitizeEndpoint` / `SanitizeToken`（去空白、去查询串、非法地址回落默认）；
+  token 为空时 UI 层回落 `HF_TOKEN` 环境变量。
+- **UI**：新建下载窗口改 `TabControl`（「链接」/「HuggingFace」），保存到/分段数/立即开始/代理单选组
+  移到页签下方两页共用，窗口固定 620×600。HF 页：模型 id + [拉取文件] + 版本 + 多选文件列表（默认全选）
+  + [全选]/[全不选] + 状态行；拉清单在 `Task.Run` 里跑、结果经 `Dispatcher.BeginInvoke` 回填，
+  失败原因（网络/超时/401/404/非 JSON）写状态行。清单请求与文件下载共用选中的代理。
+- **测试**：新增 `HfRepoTests`(7) / `HfHubClientTests`(6，含分页与 gzip) /
+  `HfDownloadPlannerTests`(10 例)，`HfDownloadViewModelTests`(7)，`NewDownloadDialogTests` 加 4 例
+  窗口级 HF 用例，`AppSettingsTests` 加 5 例归一用例；`FakeHttpServer` 增加文本响应与带查询串的精确匹配。
+  全量 **281 条全绿**（Core 206 + Ui.Mew 75），构建 0 warning。
+- **补强（同日）**：
+  - 发布前内容校验接线：`DownloadEngine.Complete` 在 part 写满并 flush 之后、改名发布之前比对
+    `ContentSha256`（HF 的 LFS oid）；不符则删 part 并报新增的 `DownloadError.Checksum`（「内容校验失败」），
+    重试从头下。`Checksum` 追加在枚举末尾，避免旧库 `error_code` 错位。
+  - 代理一致性：拉清单不再固定用窗口打开时的默认代理——每点一次「拉取文件」按当前代理单选组重建清单客户端
+    （`HfDownloadViewModel.TryUseProxy`，注入的测试客户端不动）。
+  - 测试：`IntegrityTests` 加 2 例（正确摘要发布成功 / 错误摘要失败且删 part、不发布），
+    `HfDownloadViewModelTests` 加 1 例（换代理只重建自建客户端）。全量 **284 条全绿**（Core 208 + Ui.Mew 76）。
+- **未做**：HF 侧的父任务汇总（仍是一文件一任务，`parent_id` 为 0）、文件级并发限流
+  （交回 `ConnectionSlots` 前先按任务队列跑）、`hf_transfer` 式多连接加速。
+- **后续**：torrent（MonoTorrent）仍未开始。
 
 ### 2026-11-22 · 多代理：代理表 + 默认代理 + 任务级代理选择
 

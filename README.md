@@ -11,7 +11,9 @@ Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传）�
 - **多段并发**：同一条链接切多个 Range 段并行下载，段数可配（默认 8），动态切分补位
 - **断点续传**：任务与段表都落 `xdm.db`（暂停/失败立即写、运行中 30s），进程被杀也能接着下
 - **任务库**：任务、分段、用户配置都在同一个 `xdm.db`（PureDb），绿色版目录即数据
-- **限速 / 代理 / 队列**：全局并发闸门、限速令牌桶、系统/自定义代理
+- **限速 / 代理 / 队列**：全局并发闸门、限速令牌桶、系统/自定义代理（可多套，按任务选）
+- **HuggingFace 模型下载**：输入 `owner/name` → 拉仓库文件清单 → 勾选入队；一个模型包在列表里只占一行
+  （进度/速度/状态按文件汇总），子目录原样保留，LFS 文件下发前校验 sha256
 - **默认目录**：走 `SHGetKnownFolderPath(FOLDERID_Downloads)`，用户把「下载」搬到别的盘也跟着走
 - **原生单文件**：可发布 NativeAOT 档（`build.ps1 -Aot`），15 MB 单 exe，目标机零依赖
 
@@ -22,8 +24,9 @@ Windows 桌面多线程下载工具（HTTP/HTTPS 分段下载 + 断点续传）�
   `%LOCALAPPDATA%\xdm-app`，日志在 `logs/`）—— 行为/文案/布局有疑问时直接开它对照
 - 本项目许可：GPL-3.0（见根目录 `LICENSE`），属参考实现的衍生作品
 - 首期范围：普通 HTTP/HTTPS 文件下载（多段并发 + 断点续传 + 限速 + 队列）
-- 后续路线：**V2 HF（HuggingFace）模型下载** → **V3 BT / 磁力下载**（架构预留见 `docs/ARCHITECTURE.md` §12）
-- 首期**不含**：HF、BT、视频嗅探、HLS/DASH、浏览器扩展、媒体转封装
+- 当前进度：首期 HTTP 已可用，**V2 HF（HuggingFace）模型下载已落地第一版**（无父任务汇总）；
+  下一步 **V3 BT / 磁力下载**（架构预留见 `docs/ARCHITECTURE.md` §12）
+- 暂**不含**：BT、视频嗅探、HLS/DASH、浏览器扩展、媒体转封装
 
 ## 命名约定
 
@@ -120,6 +123,7 @@ src/
     Storage/FileNaming.cs      Content-Disposition / URL → 文件名，非法字符与重名
     Storage/NameConflictPolicy.cs 发布重名策略（自动改名 / 覆盖 / 失败）
     Storage/SegmentVerifier.cs SHA256 校验挂点（V2 LFS / V3 piece）
+    HuggingFace/               HfRepo / HfFile（清单）/ HfHubClient（tree API）/ HfDownloadPlanner（落盘计划）
     Tasks/TaskStore.cs         PureDb 任务库（建表、CRUD、启动恢复）
     Tasks/StoredTask.cs        任务行 DTO（含 kind/parent_id/段快照等预留字段）
     Scheduling/DownloadQueue.cs FIFO 待启动队列（并发闸门在管理器）
@@ -149,7 +153,7 @@ src/
     Assets/xdm.ico             资源管理器 / 任务栏图标
 tests/
   Xdm.Core.Tests/              引擎单测 + 自建 TCP 级假 HTTP 服务器（Fakes/FakeHttpServer）
-  Xdm.Ui.Mew.Tests/            MewUI 视图层测试（结构/命令桥/对话框/主题/布局，42 条）
+  Xdm.Ui.Mew.Tests/            MewUI 视图层测试（结构/命令桥/对话框/主题/布局，80 条）
 artifacts/                     手工冒烟截图（m1-main.png 等，不入库）
 docs/
   PLAN.md                      总体计划、里程碑（界面优先）
@@ -193,7 +197,7 @@ dotnet run --project src/Xdm.App.Mew -- https://example.com/a.bin   # 直接弹�
 $env:XDM_DEMO=1000; dotnet run --project src/Xdm.App.Mew   # 1000 条假数据，复验列表虚拟化
 # 同一任务库只允许一个进程：已有实例在跑时，第二个进程把链接交给它后自己退出（退出码 0）
 # 键按库路径哈希计算，所以不同 --db 的两个实例可以并存（多配置并行下载）
-dotnet test                                   # 全部测试（197 条：Core 155 + Ui.Mew 42）
+dotnet test                                   # 全部测试（321 条：Core 235 + Ui.Mew 86）
 dotnet test tests/Xdm.Ui.Mew.Tests            # 视图层测试（结构/命令桥/对话框/布局）
 pwsh tools/make-icons.ps1                     # 改了 logo.png 后重生成 xdm-logo.png / xdm.ico
 .\build.ps1 -Configuration Release -Test -Publish   # ①构建 ②测试 ③发布 win-x64
